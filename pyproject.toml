@@ -7,7 +7,7 @@ name = "plex2radarr"
 version = "0.1.0"
 description = "Safely reconcile Plex movies into Radarr while preserving qBittorrent seeding"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
   "PlexAPI>=4.15,<5",
   "PyYAML>=6,<7",
@@ -32,4 +32,4 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py310"
