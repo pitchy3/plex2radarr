@@ -3,9 +3,10 @@ from __future__ import annotations
 import argparse
 import logging
 from collections import Counter
+from pathlib import Path
 
 from .config import ConfigError, load_config
-from .reconcile import Reconciler
+from .reconcile import Reconciler, SelectionError
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="plex2radarr",
         description="Safely reconcile Plex movies that are missing from Radarr.",
+    )
+    parser.add_argument(
+        "files",
+        nargs="*",
+        type=Path,
+        metavar="FILE",
+        help=(
+            "Optional movie file path(s) to reconcile. "
+            "When omitted, the whole configured Plex library is scanned."
+        ),
+    )
+    parser.add_argument(
+        "--files-from",
+        action="append",
+        type=Path,
+        default=[],
+        metavar="FILE_LIST",
+        help=(
+            "Read movie file paths from a text file, one path per line. "
+            "May be specified more than once."
+        ),
     )
     parser.add_argument(
         "--config",
@@ -27,6 +49,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     return parser
+
+
+def _collect_selected_files(
+    direct_files: list[Path], file_lists: list[Path]
+) -> list[Path]:
+    selected = [path.expanduser() for path in direct_files]
+
+    for list_path in file_lists:
+        list_path = list_path.expanduser()
+        if not list_path.is_file():
+            raise ValueError(f"File list not found: {list_path}")
+        for line in list_path.read_text().splitlines():
+            value = line.strip()
+            if not value or value.startswith("#"):
+                continue
+            selected.append(Path(value).expanduser())
+
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in selected:
+        normalized = path.resolve(strict=False)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(path)
+
+    return unique
 
 
 def _print_item(item, dry_run: bool) -> None:
@@ -53,10 +102,11 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)s %(message)s",
     )
     try:
+        selected_files = _collect_selected_files(args.files, args.files_from)
         config = load_config(args.config)
         reconciler = Reconciler(config)
-        plan = reconciler.plan()
-    except ConfigError as exc:
+        plan = reconciler.plan(selected_paths=selected_files or None)
+    except (ConfigError, SelectionError, ValueError, OSError) as exc:
         logger.error("%s", exc)
         return 2
     except Exception as exc:  # noqa: BLE001
@@ -64,8 +114,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     counts = Counter(item.action for item in plan)
+    scope = "selected Plex file(s)" if selected_files else "Plex movies"
     print(
-        f"Planned {len(plan)} Plex movies: "
+        f"Planned {len(plan)} {scope}: "
         + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
     )
 

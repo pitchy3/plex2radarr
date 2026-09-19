@@ -1,6 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from plex2radarr.config import (
     AppConfig,
     PlexConfig,
@@ -8,7 +10,7 @@ from plex2radarr.config import (
     RadarrConfig,
 )
 from plex2radarr.models import ExternalIds, PlexMovie, TorrentMatch
-from plex2radarr.reconcile import Reconciler
+from plex2radarr.reconcile import Reconciler, SelectionError
 
 
 class FakePlex:
@@ -98,3 +100,71 @@ def test_plan_hardlink_imports_unseeded_file_outside_library_root():
     )
     plan = r.plan()
     assert plan[0].action == "import"
+
+
+def test_plan_can_target_one_file():
+    matrix = PlexMovie(
+        "The Matrix",
+        1999,
+        ExternalIds(tmdb=603),
+        Path("/movies/legacy/matrix.mkv"),
+    )
+    alien = PlexMovie(
+        "Alien",
+        1979,
+        ExternalIds(tmdb=348),
+        Path("/movies/legacy/alien.mkv"),
+    )
+    r = Reconciler(
+        config(),
+        plex=FakePlex([matrix, alien]),
+        radarr=FakeRadarr([]),
+        qbits=[FakeQbit("main", {})],
+    )
+
+    plan = r.plan(selected_paths=[matrix.file_path])
+
+    assert [item.movie.title for item in plan] == ["The Matrix"]
+
+
+def test_plan_can_target_multiple_files():
+    matrix = PlexMovie(
+        "The Matrix",
+        1999,
+        ExternalIds(tmdb=603),
+        Path("/movies/legacy/matrix.mkv"),
+    )
+    alien = PlexMovie(
+        "Alien",
+        1979,
+        ExternalIds(tmdb=348),
+        Path("/movies/legacy/alien.mkv"),
+    )
+    r = Reconciler(
+        config(),
+        plex=FakePlex([matrix, alien]),
+        radarr=FakeRadarr([]),
+        qbits=[FakeQbit("main", {})],
+    )
+
+    plan = r.plan(selected_paths=[alien.file_path, matrix.file_path])
+
+    assert {item.movie.title for item in plan} == {"Alien", "The Matrix"}
+
+
+def test_plan_rejects_requested_file_not_in_plex():
+    movie = PlexMovie(
+        "The Matrix",
+        1999,
+        ExternalIds(tmdb=603),
+        Path("/movies/legacy/matrix.mkv"),
+    )
+    r = Reconciler(
+        config(),
+        plex=FakePlex([movie]),
+        radarr=FakeRadarr([]),
+        qbits=[FakeQbit("main", {})],
+    )
+
+    with pytest.raises(SelectionError, match="not found"):
+        r.plan(selected_paths=[Path("/movies/legacy/not-in-plex.mkv")])

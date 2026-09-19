@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 
 from .config import AppConfig
@@ -9,6 +10,10 @@ from .paths import PathMapper
 from .plex import PlexClient
 from .qbittorrent import QBittorrentClient
 from .radarr import RadarrClient, RadarrError
+
+
+class SelectionError(ValueError):
+    pass
 
 
 class Reconciler:
@@ -45,6 +50,36 @@ class Reconciler:
             return imdb_index.get(movie.ids.imdb, [])
         return []
 
+    @staticmethod
+    def _select_movies(
+        movies: list[PlexMovie], selected_paths: Iterable[Path] | None
+    ) -> list[PlexMovie]:
+        if selected_paths is None:
+            return movies
+
+        requested = {
+            path.expanduser().resolve(strict=False): path
+            for path in selected_paths
+        }
+        selected: list[PlexMovie] = []
+        matched: set[Path] = set()
+
+        for movie in movies:
+            normalized = movie.file_path.resolve(strict=False)
+            if normalized in requested:
+                selected.append(movie)
+                matched.add(normalized)
+
+        missing = [requested[path] for path in requested.keys() - matched]
+        if missing:
+            formatted = "\n".join(f"  - {path}" for path in sorted(missing, key=str))
+            raise SelectionError(
+                "Requested file(s) were not found in the configured Plex library:\n"
+                f"{formatted}"
+            )
+
+        return selected
+
     def _torrent_matches(self, path: Path) -> list[TorrentMatch]:
         matches: list[TorrentMatch] = []
         for qbit in self.qbits:
@@ -55,12 +90,13 @@ class Reconciler:
         root = self.mapper.to_local("radarr", self.config.radarr.root_folder)
         return path.resolve(strict=False).is_relative_to(root.resolve(strict=False))
 
-    def plan(self) -> list[PlanItem]:
+    def plan(self, selected_paths: Iterable[Path] | None = None) -> list[PlanItem]:
         radarr_movies = self.radarr.movies()
         tmdb_index, imdb_index = self._radarr_indexes(radarr_movies)
+        plex_movies = self._select_movies(self.plex.movies(), selected_paths)
         plans: list[PlanItem] = []
 
-        for movie in self.plex.movies():
+        for movie in plex_movies:
             if not movie.ids.tmdb and not movie.ids.imdb:
                 plans.append(PlanItem(movie, "skip", "no usable TMDb or IMDb identifier"))
                 continue

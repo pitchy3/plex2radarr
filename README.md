@@ -8,7 +8,7 @@ The tool is **dry-run by default**. It will not move torrent data or trigger Rad
 
 ## What it does
 
-For each movie in a configured Plex library, plex2radarr:
+For each selected movie in a configured Plex library, plex2radarr:
 
 1. Reads the movie and its media-file path from Plex.
 2. Uses TMDb/IMDb identifiers to determine whether the movie already exists in Radarr.
@@ -20,6 +20,8 @@ For each movie in a configured Plex library, plex2radarr:
    - **Unseeded file outside the Radarr/Plex root:** Radarr-import with `copy` so hardlinking can be used when possible.
 6. Adds the movie to Radarr with `searchForMovie: false`.
 7. Waits for Radarr's ManualImport command to complete.
+
+With no file arguments, the whole configured Plex library is evaluated. You can also target one file, several files, or a text file containing a batch of paths.
 
 For a seeded legacy movie, the intended end state is:
 
@@ -37,6 +39,7 @@ qBittorrent continues seeding the torrent-path file, while Radarr and Plex use t
 
 - **Dry-run is the default.**
 - There is no config option that enables writes; mutating behavior requires `--execute` every time.
+- File targeting is exact. A requested path that is not found in the configured Plex library aborts the plan instead of being silently ignored.
 - qBittorrent-owned payloads are moved by qBittorrent itself, never with a direct Python filesystem move.
 - Seeded files are imported into Radarr with `importMode=copy`.
 - Unseeded files inside the library root use `importMode=move` to prevent duplicate Plex-visible paths.
@@ -140,22 +143,85 @@ plex2radarr acts only when exactly one qBittorrent torrent matches the exact Ple
 
 ## Usage
 
-Dry run (default):
+### Entire Plex library
+
+Dry run:
 
 ```bash
 plex2radarr
 ```
 
+Execute:
+
+```bash
+plex2radarr --execute
+```
+
+### One file
+
+Dry run just one Plex movie file:
+
+```bash
+plex2radarr "/data/_Movies/The.Matrix.1999.1080p.BluRay/The.Matrix.1999.1080p.BluRay.mkv"
+```
+
+Execute just that file:
+
+```bash
+plex2radarr --execute "/data/_Movies/The.Matrix.1999.1080p.BluRay/The.Matrix.1999.1080p.BluRay.mkv"
+```
+
+### Several files
+
+Pass multiple paths directly:
+
+```bash
+plex2radarr \
+  "/data/_Movies/Movie.One/movie1.mkv" \
+  "/data/_Movies/Movie.Two/movie2.mkv"
+```
+
+Add `--execute` to perform the displayed plan:
+
+```bash
+plex2radarr --execute \
+  "/data/_Movies/Movie.One/movie1.mkv" \
+  "/data/_Movies/Movie.Two/movie2.mkv"
+```
+
+### File list
+
+For a larger batch, create a text file with one movie path per line:
+
+```text
+# movies-to-migrate.txt
+/data/_Movies/Movie.One/movie1.mkv
+/data/_Movies/Movie.Two/movie2.mkv
+/data/_Movies/Movie.Three/movie3.mkv
+```
+
+Dry run:
+
+```bash
+plex2radarr --files-from movies-to-migrate.txt
+```
+
+Execute:
+
+```bash
+plex2radarr --execute --files-from movies-to-migrate.txt
+```
+
+Blank lines and lines beginning with `#` are ignored. Direct file arguments and `--files-from` can be combined; duplicate paths are processed only once.
+
+The paths you supply are paths visible to the machine running plex2radarr, after any configured Plex path mapping.
+
+### Other options
+
 Custom config:
 
 ```bash
 plex2radarr --config /path/to/config.yaml
-```
-
-Execute the displayed plan:
-
-```bash
-plex2radarr --execute
 ```
 
 Verbose logging:
@@ -175,6 +241,7 @@ plex2radarr --verbose
 | No qBittorrent owner; file is inside Radarr library root | Radarr move import |
 | No qBittorrent owner; file is outside Radarr library root | Radarr copy/hardlink import |
 | Multiple qBittorrent torrents own the file | Skip |
+| Requested file is not present in Plex | Abort selection with an error |
 | Source file cannot be accessed during execute | Skip |
 
 ## Why qBittorrent relocation comes first
