@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
-import time
 
 import requests
 
@@ -57,7 +57,6 @@ class QBittorrentClient:
         return r.json()
 
     def _absolute_file(self, torrent: dict, rel_name: str) -> Path:
-        # save_path is the authoritative qBittorrent storage root for API matching.
         remote = Path(torrent["save_path"]) / rel_name
         return self.mapper.to_local(f"qbittorrent:{self.config.name}", remote)
 
@@ -87,14 +86,6 @@ class QBittorrentClient:
         r = self.session.post(
             self.base + "/torrents/setLocation",
             data={"hashes": torrent_hash, "location": str(location)},
-            timeout=30,
-        )
-        r.raise_for_status()
-
-    def recheck(self, torrent_hash: str) -> None:
-        r = self.session.post(
-            self.base + "/torrents/recheck",
-            data={"hashes": torrent_hash},
             timeout=30,
         )
         r.raise_for_status()
