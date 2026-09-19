@@ -23,9 +23,7 @@ class Reconciler:
         self.mapper = PathMapper(config.path_mappings)
         self.plex = plex or PlexClient(config.plex, self.mapper)
         self.radarr = radarr or RadarrClient(config.radarr)
-        self.qbits = qbits or [
-            QBittorrentClient(q, self.mapper) for q in config.qbittorrent
-        ]
+        self.qbits = qbits or [QBittorrentClient(q, self.mapper) for q in config.qbittorrent]
         self.qbit_by_name = {q.config.name: q for q in self.qbits}
 
     @staticmethod
@@ -52,6 +50,10 @@ class Reconciler:
         for qbit in self.qbits:
             matches.extend(qbit.find_matches(path))
         return matches
+
+    def _inside_radarr_root(self, path: Path) -> bool:
+        root = self.mapper.to_local("radarr", self.config.radarr.root_folder)
+        return path.resolve(strict=False).is_relative_to(root.resolve(strict=False))
 
     def plan(self) -> list[PlanItem]:
         radarr_movies = self.radarr.movies()
@@ -94,6 +96,14 @@ class Reconciler:
                         torrent=matches[0],
                     )
                 )
+            elif self._inside_radarr_root(movie.file_path):
+                plans.append(
+                    PlanItem(
+                        movie,
+                        "move_import",
+                        "missing from Radarr; unseeded legacy file is inside the library root",
+                    )
+                )
             else:
                 plans.append(
                     PlanItem(
@@ -114,42 +124,40 @@ class Reconciler:
             return item
 
         source = item.movie.file_path
+        import_mode = "move" if item.action == "move_import" else "copy"
 
         if item.action == "relocate_and_import":
             assert item.torrent is not None
             qbit = self.qbit_by_name[item.torrent.client_name]
-            qcfg = qbit.config
-            relocation_root = Path(qcfg.relocation_root)
-            if source.resolve(strict=False).is_relative_to(relocation_root.resolve(strict=False)):
+            remote_relocation_root = Path(qbit.config.relocation_root)
+            local_relocation_root = self.mapper.to_local(
+                f"qbittorrent:{qbit.config.name}", remote_relocation_root
+            )
+            if source.resolve(strict=False).is_relative_to(
+                local_relocation_root.resolve(strict=False)
+            ):
                 item.notes.append("source already under configured relocation root")
             else:
-                qbit.set_location(item.torrent.torrent_hash, relocation_root)
-                qbit.wait_for_save_path(item.torrent.torrent_hash, relocation_root)
-                # Re-query exact payload path after qBittorrent has moved it.
-                refreshed = qbit.find_matches(
-                    self._find_relocated_by_basename(qbit, item.torrent.torrent_hash, source.name)
+                qbit.set_location(item.torrent.torrent_hash, remote_relocation_root)
+                qbit.wait_for_save_path(item.torrent.torrent_hash, local_relocation_root)
+                source = self._find_relocated_by_basename(
+                    qbit, item.torrent.torrent_hash, source.name
                 )
-                if refreshed:
-                    source = refreshed[0].file_path
-                else:
-                    source = self._find_relocated_by_basename(
-                        qbit, item.torrent.torrent_hash, source.name
-                    )
-                qbit.recheck(item.torrent.torrent_hash)
                 item.notes.append(f"qBittorrent source relocated to {source}")
 
         added = self.radarr.add_movie(item.movie)
         movie_id = int(added["id"])
         item.radarr_movie_id = movie_id
 
-        candidates = self.radarr.manual_import_candidates(source.parent, movie_id)
+        radarr_folder = self.mapper.to_remote("radarr", source.parent)
+        candidates = self.radarr.manual_import_candidates(radarr_folder, movie_id)
         exact = [c for c in candidates if Path(c.get("path", "")).name == source.name]
         if len(exact) != 1:
             raise RadarrError(
                 f"Expected exactly one Radarr manual-import candidate for {source}, got {len(exact)}"
             )
 
-        command = self.radarr.import_file(exact[0], movie_id)
+        command = self.radarr.import_file(exact[0], movie_id, mode=import_mode)
         if command.get("id"):
             result = self.radarr.wait_for_command(int(command["id"]))
             if result.get("status") != "completed":
@@ -157,7 +165,7 @@ class Reconciler:
                     f"Radarr ManualImport failed for {item.movie.title}: {result}"
                 )
 
-        item.notes.append("Radarr manual import requested with importMode=copy")
+        item.notes.append(f"Radarr manual import requested with importMode={import_mode}")
         return item
 
     @staticmethod
