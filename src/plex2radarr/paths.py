@@ -12,11 +12,27 @@ class PathMapper:
     def to_local(self, service: str, path: str | Path) -> Path:
         text = str(path)
         matches = [
-            m for m in self._mappings
-            if m.service == service and (text == m.remote or text.startswith(m.remote.rstrip("/") + "/"))
+            m
+            for m in self._mappings
+            if m.service == service
+            and (text == m.remote or text.startswith(m.remote.rstrip("/") + "/"))
         ]
         if not matches:
             return Path(text)
         mapping = max(matches, key=lambda m: len(m.remote))
         suffix = text[len(mapping.remote):].lstrip("/")
         return Path(mapping.local) / suffix if suffix else Path(mapping.local)
+
+    def to_remote(self, service: str, path: str | Path) -> Path:
+        text = str(path)
+        matches = [
+            m
+            for m in self._mappings
+            if m.service == service
+            and (text == m.local or text.startswith(m.local.rstrip("/") + "/"))
+        ]
+        if not matches:
+            return Path(text)
+        mapping = max(matches, key=lambda m: len(m.local))
+        suffix = text[len(mapping.local):].lstrip("/")
+        return Path(mapping.remote) / suffix if suffix else Path(mapping.remote)
