@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             executed = reconciler.execute(item)
             _print_item(executed, dry_run=False)
-        except Exception:  # noqa: BLE001
+        except Exception:
             failures += 1
             logger.exception("Failed to reconcile %s", item.movie.title)
 
