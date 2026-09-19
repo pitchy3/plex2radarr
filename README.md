@@ -52,7 +52,7 @@ qBittorrent continues seeding the torrent-path file, while Radarr and Plex use t
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.10+
 - Plex
 - Radarr
 - qBittorrent for seeded-file relocation
@@ -297,7 +297,7 @@ ruff check .
 pytest
 ```
 
-GitHub Actions runs both checks on Python 3.11, 3.12, and 3.13.
+GitHub Actions runs both checks on Python 3.10, 3.11, 3.12, and 3.13.
 
 ## License
 
