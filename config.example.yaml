@@ -1,0 +1,20 @@
+plex:
+  url: http://127.0.0.1:32400
+  token: ${PLEX_TOKEN}
+  library: Movies
+
+radarr:
+  url: http://127.0.0.1:7878
+  api_key: ${RADARR_API_KEY}
+  root_folder: /data/_Movies
+  quality_profile: Any
+  monitored: false
+
+qbittorrent:
+  - name: main
+    url: http://127.0.0.1:8080
+    username: ${QBIT_USERNAME}
+    password: ${QBIT_PASSWORD}
+    relocation_root: /data/torrents/movies
+
+path_mappings: []
