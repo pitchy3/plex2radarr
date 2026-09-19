@@ -43,15 +43,6 @@ class RadarrClient:
             f"Quality profile {self.config.quality_profile!r} not found. Available: {available}"
         )
 
-    def root_folder(self) -> dict:
-        roots = self._get("/rootfolder")
-        wanted = self.config.root_folder.rstrip("/")
-        for root in roots:
-            if str(root.get("path", "")).rstrip("/") == wanted:
-                return root
-        available = ", ".join(str(r.get("path")) for r in roots)
-        raise RadarrError(f"Radarr root folder {wanted!r} not found. Available: {available}")
-
     def lookup(self, movie: PlexMovie) -> dict:
         if movie.ids.tmdb:
             items = self._get("/movie/lookup", term=f"tmdb:{movie.ids.tmdb}")
@@ -87,15 +78,16 @@ class RadarrClient:
             replaceExistingFiles="false",
         )
 
-    def import_file(self, candidate: dict, movie_id: int) -> dict:
+    def import_file(self, candidate: dict, movie_id: int, mode: str = "copy") -> dict:
+        if mode not in {"copy", "move"}:
+            raise ValueError(f"Unsupported Radarr import mode: {mode}")
         payload_item = dict(candidate)
         payload_item["movieId"] = movie_id
-        payload_item["importMode"] = "copy"
-        cmd = self._post(
+        payload_item["importMode"] = mode
+        return self._post(
             "/command",
-            {"name": "ManualImport", "files": [payload_item], "importMode": "copy"},
+            {"name": "ManualImport", "files": [payload_item], "importMode": mode},
         )
-        return cmd
 
     def wait_for_command(self, command_id: int, timeout: int = 180) -> dict:
         deadline = time.monotonic() + timeout
