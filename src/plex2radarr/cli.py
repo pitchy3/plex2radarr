@@ -7,6 +7,8 @@ from collections import Counter
 from .config import ConfigError, load_config
 from .reconcile import Reconciler
 
+logger = logging.getLogger(__name__)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -54,8 +56,11 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(args.config)
         reconciler = Reconciler(config)
         plan = reconciler.plan()
-    except (ConfigError, Exception) as exc:
-        logging.error("%s", exc)
+    except ConfigError as exc:
+        logger.error("%s", exc)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Unable to build reconciliation plan: %s", exc)
         return 2
 
     counts = Counter(item.action for item in plan)
@@ -75,9 +80,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             executed = reconciler.execute(item)
             _print_item(executed, dry_run=False)
-        except Exception as exc:
+        except Exception:  # noqa: BLE001
             failures += 1
-            logging.exception("Failed to reconcile %s: %s", item.movie.title, exc)
+            logger.exception("Failed to reconcile %s", item.movie.title)
 
     return 1 if failures else 0
 
