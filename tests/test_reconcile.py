@@ -74,8 +74,21 @@ def test_plan_relocates_when_qbit_owns_source():
     assert plan[0].torrent == match
 
 
-def test_plan_imports_when_no_torrent_owns_source():
-    path = Path("/movies/matrix.mkv")
+def test_plan_moves_unseeded_legacy_file_inside_library_root():
+    path = Path("/movies/legacy/matrix.mkv")
+    movie = PlexMovie("The Matrix", 1999, ExternalIds(tmdb=603), path)
+    r = Reconciler(
+        config(),
+        plex=FakePlex([movie]),
+        radarr=FakeRadarr([]),
+        qbits=[FakeQbit("main", {})],
+    )
+    plan = r.plan()
+    assert plan[0].action == "move_import"
+
+
+def test_plan_hardlink_imports_unseeded_file_outside_library_root():
+    path = Path("/imports/matrix.mkv")
     movie = PlexMovie("The Matrix", 1999, ExternalIds(tmdb=603), path)
     r = Reconciler(
         config(),
