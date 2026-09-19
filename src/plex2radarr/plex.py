@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from plexapi.server import PlexServer
 
 from .config import PlexConfig
@@ -28,7 +26,6 @@ class PlexClient:
                     pass
             elif value.startswith("imdb://"):
                 imdb = value.split("://", 1)[1]
-        # Older Plex metadata can expose a single guid.
         value = getattr(item, "guid", "") or ""
         if tmdb is None and value.startswith("tmdb://"):
             try:
