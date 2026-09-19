@@ -13,14 +13,15 @@ For each movie in a configured Plex library, plex2radarr:
 1. Reads the movie and its media-file path from Plex.
 2. Uses TMDb/IMDb identifiers to determine whether the movie already exists in Radarr.
 3. Skips movies already managed by Radarr.
-4. Checks configured qBittorrent instances to determine whether the Plex file belongs to an existing torrent.
-5. Plans a safe reconciliation:
-   - If qBittorrent owns the file, relocate the torrent through qBittorrent to a dedicated torrent/download root first.
-   - Add the movie to Radarr without searching for a replacement download.
-   - Ask Radarr to manually import the relocated/existing file using **copy mode** so Radarr can hard-link it when hardlinks are enabled and the paths share a filesystem.
-6. Verifies the result where possible.
+4. Checks all configured qBittorrent instances for ownership of the exact Plex file.
+5. Plans the safest migration:
+   - **Seeded file:** relocate the torrent through qBittorrent first, then Radarr-import with `copy` so Radarr can hard-link it.
+   - **Unseeded legacy file already inside the Radarr/Plex root:** Radarr-import with `move`, which removes the nonconforming Plex-visible path instead of creating a duplicate.
+   - **Unseeded file outside the Radarr/Plex root:** Radarr-import with `copy` so hardlinking can be used when possible.
+6. Adds the movie to Radarr with `searchForMovie: false`.
+7. Waits for Radarr's ManualImport command to complete.
 
-This produces the desired end state:
+For a seeded legacy movie, the intended end state is:
 
 ```text
 /torrents/...release-name...mkv
@@ -30,35 +31,32 @@ This produces the desired end state:
 /_Movies/The Matrix (1999)/...Radarr-name...mkv
 ```
 
-qBittorrent continues seeding the torrent-path file, while Radarr and Plex use the organized library path. Only one set of file data is stored when hardlinks are possible.
+qBittorrent continues seeding the torrent-path file, while Radarr and Plex use the organized library path.
 
 ## Safety model
 
-Safety is the primary design goal.
-
-- **Dry-run is the default.** Running `plex2radarr` with no execution flag only reports what it would do.
-- File/torrent movement requires the explicit `--execute` command-line flag.
-- Radarr movie additions use `searchForMovie: false`.
-- Radarr manual imports explicitly request `importMode: copy`; they do not intentionally move the seeding source out from under qBittorrent.
-- qBittorrent-owned payloads are relocated by qBittorrent itself rather than by Python filesystem moves.
-- Ambiguous movie matches, ambiguous torrent ownership, missing IDs, inaccessible files, and unsafe destination collisions are skipped instead of guessed.
+- **Dry-run is the default.**
+- There is no config option that enables writes; mutating behavior requires `--execute` every time.
+- qBittorrent-owned payloads are moved by qBittorrent itself, never with a direct Python filesystem move.
+- Seeded files are imported into Radarr with `importMode=copy`.
+- Unseeded files inside the library root use `importMode=move` to prevent duplicate Plex-visible paths.
+- Radarr additions never automatically search for a replacement download.
+- Ambiguous Radarr identities and multiple qBittorrent owners are skipped rather than guessed.
 - Multiple qBittorrent instances are supported.
-- Optional path mappings allow API/container paths to be translated into paths visible to this Python process.
+- API/container path mappings are supported in both directions.
 
-**Before using `--execute`, review the full dry-run output and back up anything you cannot replace.**
+**Review the complete dry-run before using `--execute`. Back up anything you cannot replace.**
 
 ## Requirements
 
 - Python 3.11+
 - Plex
 - Radarr
-- qBittorrent (optional, but required to safely relocate files that are actively seeded)
-- Radarr configured with **Use Hardlinks instead of Copy** if you want zero-extra-space imports
-- Torrent/download storage and the Radarr library on the same filesystem for hardlinks
+- qBittorrent for seeded-file relocation
+- Radarr **Use Hardlinks instead of Copy** enabled if you want hardlinked copy imports
+- Source and Radarr destination on the same filesystem for hardlinks
 
 ## Installation
-
-Clone the repository and install it into a virtual environment:
 
 ```bash
 git clone https://github.com/pitchy3/plex2radarr.git
@@ -69,7 +67,7 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-For development/test dependencies:
+Development dependencies:
 
 ```bash
 pip install -e ".[dev]"
@@ -77,17 +75,11 @@ pip install -e ".[dev]"
 
 ## Configuration
 
-Copy the example configuration:
-
 ```bash
 cp config.example.yaml config.yaml
 ```
 
-Then edit `config.yaml`.
-
-Secrets may be supplied literally or with environment-variable placeholders such as `${PLEX_TOKEN}`. Environment-variable placeholders are expanded when the configuration is loaded.
-
-Example:
+Secrets can be literal values or environment-variable placeholders such as `${PLEX_TOKEN}`.
 
 ```yaml
 plex:
@@ -98,7 +90,7 @@ plex:
 radarr:
   url: http://127.0.0.1:7878
   api_key: ${RADARR_API_KEY}
-  root_folder: /data/_Movies
+  root_folder: /movies
   quality_profile: Any
   monitored: false
 
@@ -107,24 +99,25 @@ qbittorrent:
     url: http://127.0.0.1:8080
     username: ${QBIT_USERNAME}
     password: ${QBIT_PASSWORD}
-    relocation_root: /data/torrents/movies
+    relocation_root: /downloads/movies
 
 path_mappings:
-  # Optional. First matching prefix wins.
   - service: plex
     remote: /media/movies
     local: /data/_Movies
+
   - service: radarr
     remote: /movies
     local: /data/_Movies
+
   - service: qbittorrent:main
     remote: /downloads
     local: /data/torrents
 ```
 
-### Multiple qBittorrent instances
+`radarr.root_folder` must be the path as **Radarr sees it**. Each qBittorrent `relocation_root` must likewise be the path as that **qBittorrent instance sees it**. Path mappings translate those service paths to the local filesystem path visible to plex2radarr.
 
-Add as many entries as required:
+### Multiple qBittorrent instances
 
 ```yaml
 qbittorrent:
@@ -132,113 +125,87 @@ qbittorrent:
     url: http://127.0.0.1:8080
     username: user
     password: pass
-    relocation_root: /data/torrents/movies-1080p
+    relocation_root: /downloads/movies-1080p
 
   - name: 4k
     url: http://127.0.0.1:18080
     username: user
     password: pass
-    relocation_root: /data/torrents/movies-4k
+    relocation_root: /downloads/movies-4k
 ```
 
-plex2radarr checks each configured instance and only acts when exactly one torrent payload matches the Plex file. Ambiguous matches are skipped.
+Use matching path mappings when those instances expose different container paths.
+
+plex2radarr acts only when exactly one qBittorrent torrent matches the exact Plex file path. If more than one matches, it skips the movie.
 
 ## Usage
 
-### Dry run
-
-Dry run is the default:
+Dry run (default):
 
 ```bash
 plex2radarr
 ```
 
-or explicitly:
+Custom config:
 
 ```bash
-plex2radarr --config config.yaml
-```
-
-The default config path is `./config.yaml`.
-
-### Execute
-
-To perform planned qBittorrent relocations, Radarr additions, and Radarr imports:
-
-```bash
-plex2radarr --execute
-```
-
-There is intentionally no config option that enables execution. Mutating behavior must be requested on the command line each time.
-
-### Useful options
-
-```bash
-plex2radarr --help
 plex2radarr --config /path/to/config.yaml
-plex2radarr --verbose
+```
+
+Execute the displayed plan:
+
+```bash
 plex2radarr --execute
+```
+
+Verbose logging:
+
+```bash
+plex2radarr --verbose
 ```
 
 ## Reconciliation behavior
 
-A Plex movie can result in one of several outcomes:
-
-| Situation | Action |
+| Situation | Planned action |
 |---|---|
 | Movie already exists in Radarr | Skip |
-| Plex item has no usable TMDb/IMDb identity | Skip |
-| Multiple Radarr matches are possible | Skip |
-| Plex file is owned by exactly one qBittorrent torrent | Relocate torrent through qBittorrent, then import via Radarr |
-| Plex file has no qBittorrent owner | Add to Radarr and import the existing file |
-| More than one torrent appears to own the same file | Skip |
-| Destination/relocation collision is detected | Skip |
-| File is inaccessible to this process | Skip |
+| No TMDb/IMDb ID | Skip |
+| Multiple Radarr identity matches | Skip |
+| Exactly one qBittorrent torrent owns the file | qBittorrent relocation → Radarr copy/hardlink import |
+| No qBittorrent owner; file is inside Radarr library root | Radarr move import |
+| No qBittorrent owner; file is outside Radarr library root | Radarr copy/hardlink import |
+| Multiple qBittorrent torrents own the file | Skip |
+| Source file cannot be accessed during execute | Skip |
 
-### Why qBittorrent relocation comes first
+## Why qBittorrent relocation comes first
 
-Consider a legacy movie:
+Given:
 
 ```text
 _Movies/The.Matrix.1999.1080p.BluRay/
 └── The.Matrix.1999.1080p.BluRay.mkv
 ```
 
-If qBittorrent seeds that exact path, simply hard-linking it into a new Radarr-standard folder would leave two Plex-visible paths.
+if qBittorrent seeds that exact path, hardlinking it immediately into a new Radarr-standard directory would leave two Plex-visible movie paths.
 
-plex2radarr instead asks qBittorrent to relocate the torrent payload to its configured torrent root first. Once the original legacy library path is no longer present, Radarr can import/hard-link from the torrent root into its canonical library folder without Plex seeing duplicate copies.
+plex2radarr first calls qBittorrent's set-location operation. After qBittorrent reports the new save path, plex2radarr re-queries its file list to discover the payload's actual relocated path. Radarr then imports from that torrent path with copy mode, allowing its normal hardlink behavior.
 
 ## Path mappings
 
-API applications frequently expose different paths than the host running plex2radarr.
-
-For example:
+Mappings are prefix-based and case-sensitive. They work in both directions:
 
 ```text
-Plex reports:       /media/movies/The Matrix/movie.mkv
-Host filesystem:   /data/_Movies/The Matrix/movie.mkv
+Radarr sees:       /movies/The Matrix (1999)/movie.mkv
+Host sees:         /data/_Movies/The Matrix (1999)/movie.mkv
 ```
 
-A mapping translates the reported path:
-
-```yaml
-path_mappings:
-  - service: plex
-    remote: /media/movies
-    local: /data/_Movies
-```
-
-Service names are:
+Supported service names:
 
 - `plex`
 - `radarr`
 - `qbittorrent:<configured-name>`
 
-Mappings are prefix-based and case-sensitive.
-
 ## Hardlink verification
-
-After an import, you can verify two files are hardlinked on Linux:
 
 ```bash
 stat -c '%d %i %h %n' \
@@ -246,30 +213,24 @@ stat -c '%d %i %h %n' \
   "/data/_Movies/The Matrix (1999)/.../movie.mkv"
 ```
 
-A successful hardlink has the same device ID and inode number for both paths.
+The device ID and inode should match.
 
-## Important limitations
+## Current limitations
 
-- plex2radarr does not bypass normal filesystem rules. Hardlinks cannot span filesystems.
-- The tool does not delete duplicate files on its own outside the qBittorrent relocation flow.
-- Plex items containing multiple movie files/versions are treated conservatively; the tool currently reconciles only items with exactly one local media file.
-- Extras, trailers, subtitles, and other sidecar files are not migrated in the first release.
-- Radarr naming is ultimately controlled by your Radarr Media Management settings.
-- qBittorrent relocation behavior depends on the torrent's own internal file/folder layout; plex2radarr re-queries qBittorrent after relocation rather than assuming the resulting path.
+- Hardlinks cannot span filesystems.
+- Plex items with more than one local movie file/version are skipped.
+- Extras, trailers, subtitles, and sidecars are not migrated in the first release.
+- The first release does not attempt fuzzy filename-to-torrent matching; torrent ownership must match the exact translated file path.
+- Radarr naming is controlled by your Radarr Media Management configuration.
 
 ## Development
 
-Run tests with:
-
 ```bash
+ruff check .
 pytest
 ```
 
-Static checks:
-
-```bash
-ruff check .
-```
+GitHub Actions runs both checks on Python 3.11, 3.12, and 3.13.
 
 ## License
 
