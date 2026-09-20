@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from plex2radarr.cli import _collect_selected_files, build_parser
+from plex2radarr.cli import _collect_selected_files, _state_path_for_config, build_parser
 
 
 def test_parser_accepts_single_file():
@@ -49,3 +49,12 @@ def test_collect_selected_files_deduplicates_paths(tmp_path: Path):
 def test_collect_selected_files_rejects_missing_list_file(tmp_path: Path):
     with pytest.raises(ValueError, match="File list not found"):
         _collect_selected_files([], [tmp_path / "missing.txt"])
+
+
+def test_state_path_is_isolated_by_config_filename(tmp_path: Path):
+    first = _state_path_for_config(tmp_path / "config.yaml")
+    second = _state_path_for_config(tmp_path / "movies-4k.yaml")
+
+    assert first != second
+    assert first.name == ".plex2radarr-state.config.yaml.json"
+    assert second.name == ".plex2radarr-state.movies-4k.yaml.json"
