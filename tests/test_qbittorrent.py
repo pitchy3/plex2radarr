@@ -1,13 +1,18 @@
 from collections import Counter
 from pathlib import Path
 
-from plex2radarr.config import QBittorrentConfig
+from plex2radarr.config import PathMapping, QBittorrentConfig
 from plex2radarr.paths import PathMapper
 from plex2radarr.qbittorrent import QBittorrentClient
 
 
 class CountingQBittorrentClient(QBittorrentClient):
-    def __init__(self, torrents: list[dict], files_by_hash: dict[str, list[dict]]):
+    def __init__(
+        self,
+        torrents: list[dict],
+        files_by_hash: dict[str, list[dict]],
+        mapper: PathMapper | None = None,
+    ):
         self.torrent_data = torrents
         self.file_data = files_by_hash
         self.torrent_calls = 0
@@ -20,7 +25,7 @@ class CountingQBittorrentClient(QBittorrentClient):
                 password="pass",
                 relocation_root="/downloads",
             ),
-            PathMapper(()),
+            mapper or PathMapper(()),
         )
 
     def _login(self) -> None:
@@ -91,3 +96,42 @@ def test_refresh_torrent_updates_only_the_moved_torrent():
 
     assert client.torrent_calls == 1
     assert client.file_calls == Counter({"aaa": 2, "bbb": 1})
+
+
+def test_index_uses_resolved_key_but_preserves_mapped_file_path(tmp_path: Path):
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    mapped_root = tmp_path / "mapped"
+    mapped_root.symlink_to(real_root, target_is_directory=True)
+
+    mapper = PathMapper(
+        (
+            PathMapping(
+                "qbittorrent:main",
+                "/downloads",
+                str(mapped_root),
+            ),
+            PathMapping(
+                "radarr",
+                "/movies",
+                str(mapped_root),
+            ),
+        )
+    )
+    client = CountingQBittorrentClient(
+        torrents=[
+            {
+                "hash": "aaa",
+                "name": "Movie A",
+                "save_path": "/downloads",
+                "progress": 1.0,
+            }
+        ],
+        files_by_hash={"aaa": [{"name": "a.mkv", "progress": 1.0}]},
+        mapper=mapper,
+    )
+
+    match = client.find_matches(real_root / "a.mkv")[0]
+
+    assert match.file_path == mapped_root / "a.mkv"
+    assert mapper.to_remote("radarr", match.file_path.parent) == Path("/movies")
