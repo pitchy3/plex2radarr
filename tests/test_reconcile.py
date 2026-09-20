@@ -5,12 +5,15 @@ import pytest
 
 from plex2radarr.config import (
     AppConfig,
+    PathMapping,
     PlexConfig,
     QBittorrentConfig,
     RadarrConfig,
 )
-from plex2radarr.models import ExternalIds, PlexMovie, TorrentMatch
+from plex2radarr.models import ExternalIds, PlanItem, PlexMovie, TorrentMatch
+from plex2radarr.paths import PathMappingError
 from plex2radarr.reconcile import Reconciler, SelectionError
+from plex2radarr.state import StateStore
 
 
 class FakePlex:
@@ -28,32 +31,40 @@ class FakeRadarr:
     def movies(self):
         return self._movies
 
+    def movie(self, movie_id):
+        return next(movie for movie in self._movies if movie["id"] == movie_id)
+
 
 class FakeQbit:
-    def __init__(self, name, matches):
-        self.config = SimpleNamespace(name=name)
+    def __init__(self, name, matches, matches_by_hash=None, relocation_root="/torrents/movies"):
+        self.config = SimpleNamespace(name=name, relocation_root=relocation_root)
         self._matches = matches
+        self._matches_by_hash = matches_by_hash or {}
 
     def find_matches(self, path):
         return list(self._matches.get(path, []))
 
+    def matches_for_hash(self, torrent_hash):
+        return list(self._matches_by_hash.get(torrent_hash, []))
 
-def config():
+
+def config(path_mappings=()):
     return AppConfig(
         plex=PlexConfig("http://plex", "token", "Movies"),
         radarr=RadarrConfig("http://radarr", "key", "/movies", "Any"),
         qbittorrent=(
             QBittorrentConfig("main", "http://qbit", "u", "p", "/torrents/movies"),
         ),
+        path_mappings=tuple(path_mappings),
     )
 
 
-def test_plan_skips_existing_radarr_movie():
+def test_plan_skips_existing_radarr_movie_with_file():
     movie = PlexMovie("The Matrix", 1999, ExternalIds(tmdb=603), Path("/movies/matrix.mkv"))
     r = Reconciler(
         config(),
         plex=FakePlex([movie]),
-        radarr=FakeRadarr([{"id": 1, "tmdbId": 603}]),
+        radarr=FakeRadarr([{"id": 1, "tmdbId": 603, "hasFile": True}]),
         qbits=[FakeQbit("main", {})],
     )
     plan = r.plan()
@@ -61,10 +72,33 @@ def test_plan_skips_existing_radarr_movie():
     assert plan[0].radarr_movie_id == 1
 
 
+def test_plan_reuses_existing_radarr_movie_without_file():
+    path = Path("/movies/matrix.mkv")
+    movie = PlexMovie("The Matrix", 1999, ExternalIds(tmdb=603), path)
+    r = Reconciler(
+        config(),
+        plex=FakePlex([movie]),
+        radarr=FakeRadarr([{"id": 1, "tmdbId": 603, "hasFile": False}]),
+        qbits=[FakeQbit("main", {})],
+    )
+    plan = r.plan()
+    assert plan[0].action == "move_import"
+    assert plan[0].radarr_movie_id == 1
+    assert "reuse existing missing Radarr movie" in plan[0].reason
+
+
 def test_plan_relocates_when_qbit_owns_source():
     path = Path("/movies/matrix.mkv")
     movie = PlexMovie("The Matrix", 1999, ExternalIds(tmdb=603), path)
-    match = TorrentMatch("main", "abc", "matrix", path, Path("/movies"), 1.0)
+    match = TorrentMatch(
+        "main",
+        "abc",
+        "matrix",
+        path,
+        Path("/movies"),
+        1.0,
+        Path("matrix.mkv"),
+    )
     r = Reconciler(
         config(),
         plex=FakePlex([movie]),
@@ -152,7 +186,7 @@ def test_plan_can_target_multiple_files():
     assert {item.movie.title for item in plan} == {"Alien", "The Matrix"}
 
 
-def test_plan_rejects_requested_file_not_in_plex():
+def test_plan_rejects_requested_file_not_in_plex_or_journal():
     movie = PlexMovie(
         "The Matrix",
         1999,
@@ -168,3 +202,236 @@ def test_plan_rejects_requested_file_not_in_plex():
 
     with pytest.raises(SelectionError, match="not found"):
         r.plan(selected_paths=[Path("/movies/legacy/not-in-plex.mkv")])
+
+
+def test_recovery_can_target_original_path_after_plex_loses_file(tmp_path: Path):
+    original = Path("/movies/legacy/matrix.mkv")
+    moved = Path("/torrents/movies/matrix.mkv")
+    movie = PlexMovie("The Matrix", 1999, ExternalIds(tmdb=603), original)
+    original_match = TorrentMatch(
+        "main",
+        "abc",
+        "matrix",
+        original,
+        Path("/movies/legacy"),
+        1.0,
+        Path("matrix.mkv"),
+    )
+    moved_match = TorrentMatch(
+        "main",
+        "abc",
+        "matrix",
+        moved,
+        Path("/torrents/movies"),
+        1.0,
+        Path("matrix.mkv"),
+    )
+    state = StateStore(tmp_path / "state.json")
+    transaction = state.begin(
+        movie,
+        "relocate_and_import",
+        original_match,
+        None,
+        original,
+    )
+    state.update(
+        transaction.key,
+        stage="torrent_relocated",
+        current_source=str(moved),
+        radarr_movie_id=7,
+    )
+
+    r = Reconciler(
+        config(),
+        plex=FakePlex([]),
+        radarr=FakeRadarr([{"id": 7, "tmdbId": 603, "hasFile": False}]),
+        qbits=[
+            FakeQbit(
+                "main",
+                {},
+                matches_by_hash={"abc": [moved_match]},
+            )
+        ],
+        state=state,
+    )
+
+    plan = r.plan(selected_paths=[original])
+
+    assert len(plan) == 1
+    assert plan[0].action == "relocate_and_import"
+    assert plan[0].source_path == moved
+    assert plan[0].radarr_movie_id == 7
+    assert "resume interrupted reconciliation" in plan[0].reason
+
+
+def test_preflight_rejects_radarr_mapping_that_cannot_see_relocation_root(tmp_path: Path):
+    original = Path("/Volume2/Media/_Movies/Movie/movie.mkv")
+    movie = PlexMovie("Movie", 2020, ExternalIds(tmdb=1), original)
+    match = TorrentMatch(
+        "main",
+        "abc",
+        "Movie",
+        original,
+        Path("/Volume2/Media/_Movies"),
+        1.0,
+        Path("Movie/movie.mkv"),
+    )
+    cfg = AppConfig(
+        plex=PlexConfig("http://plex", "token", "Movies"),
+        radarr=RadarrConfig("http://radarr", "key", "/data/_Movies", "Any"),
+        qbittorrent=(
+            QBittorrentConfig(
+                "main",
+                "http://qbit",
+                "u",
+                "p",
+                "/downloads/torrents",
+            ),
+        ),
+        path_mappings=(
+            PathMapping(
+                "radarr",
+                "/data/_Movies",
+                "/Volume2/Media/_Movies",
+            ),
+            PathMapping(
+                "qbittorrent:main",
+                "/downloads",
+                "/Volume2/Media",
+            ),
+        ),
+    )
+    r = Reconciler(
+        cfg,
+        plex=FakePlex([movie]),
+        radarr=FakeRadarr([]),
+        qbits=[
+            FakeQbit(
+                "main",
+                {original: [match]},
+                relocation_root="/downloads/torrents",
+            )
+        ],
+        state=StateStore(tmp_path / "state.json"),
+    )
+    plan = r.plan()
+
+    with pytest.raises(PathMappingError, match="not covered"):
+        r.preflight(plan)
+
+
+def test_multi_file_torrent_journals_all_affected_plex_movies(tmp_path: Path):
+    first_path = tmp_path / "library" / "one.mkv"
+    second_path = tmp_path / "library" / "two.mkv"
+    first_path.parent.mkdir(parents=True)
+    first_path.write_text("one")
+    second_path.write_text("two")
+
+    first = PlexMovie("One", 2001, ExternalIds(tmdb=1), first_path)
+    second = PlexMovie("Two", 2002, ExternalIds(tmdb=2), second_path)
+    first_match = TorrentMatch(
+        "main",
+        "samehash",
+        "bundle",
+        first_path,
+        first_path.parent,
+        1.0,
+        Path("one.mkv"),
+    )
+    second_match = TorrentMatch(
+        "main",
+        "samehash",
+        "bundle",
+        second_path,
+        second_path.parent,
+        1.0,
+        Path("two.mkv"),
+    )
+    state = StateStore(tmp_path / "state.json")
+    qbit = FakeQbit(
+        "main",
+        {
+            first_path: [first_match],
+            second_path: [second_match],
+        },
+        relocation_root=str(tmp_path / "torrents"),
+    )
+    r = Reconciler(
+        config(),
+        plex=FakePlex([first, second]),
+        radarr=FakeRadarr([]),
+        qbits=[qbit],
+        state=state,
+    )
+    current = PlanItem(
+        first,
+        "relocate_and_import",
+        "test",
+        torrent=first_match,
+    )
+    state.begin(first, current.action, first_match, None, first_path)
+
+    r._journal_torrent_companions(
+        current,
+        qbit,
+        tmp_path / "torrents",
+    )
+
+    keys = {transaction.key for transaction in state.all()}
+    assert keys == {"tmdb:1", "tmdb:2"}
+
+
+def test_recovery_does_not_resubmit_persisted_radarr_command(tmp_path: Path):
+    source = tmp_path / "movie.mkv"
+    source.write_text("movie")
+    movie = PlexMovie("Movie", 2020, ExternalIds(tmdb=1), source)
+    state = StateStore(tmp_path / "state.json")
+    transaction = state.begin(movie, "import", None, 7, source)
+    state.update(
+        transaction.key,
+        stage="radarr_import_submitted",
+        radarr_movie_id=7,
+        radarr_command_id=55,
+    )
+
+    class SubmittedCommandRadarr:
+        def __init__(self):
+            self.import_calls = 0
+            self.waited_for = []
+
+        def wait_for_command(self, command_id):
+            self.waited_for.append(command_id)
+            return {"id": command_id, "status": "completed"}
+
+        def movie(self, movie_id):
+            return {"id": movie_id, "tmdbId": 1, "hasFile": True}
+
+        def manual_import_candidates(self, folder, movie_id):
+            raise AssertionError("manual import candidates should not be queried")
+
+        def import_file(self, candidate, movie_id, mode="copy"):
+            self.import_calls += 1
+            raise AssertionError("import should not be submitted again")
+
+    radarr = SubmittedCommandRadarr()
+    r = Reconciler(
+        config(),
+        plex=FakePlex([]),
+        radarr=radarr,
+        qbits=[],
+        state=state,
+    )
+    item = PlanItem(
+        movie,
+        "import",
+        "resume",
+        radarr_movie_id=7,
+        source_path=source,
+        transaction_key=transaction.key,
+    )
+
+    r.execute(item)
+
+    assert radarr.waited_for == [55]
+    assert radarr.import_calls == 0
+    assert state.all() == []

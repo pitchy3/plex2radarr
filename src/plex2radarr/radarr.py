@@ -33,6 +33,9 @@ class RadarrClient:
     def movies(self) -> list[dict]:
         return self._get("/movie")
 
+    def movie(self, movie_id: int) -> dict:
+        return self._get(f"/movie/{movie_id}")
+
     def quality_profile_id(self) -> int:
         profiles = self._get("/qualityprofile")
         for profile in profiles:

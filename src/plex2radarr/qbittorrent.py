@@ -80,6 +80,7 @@ class QBittorrentClient:
                         f"qbittorrent:{self.config.name}", torrent["save_path"]
                     ),
                     progress=float(torrent.get("progress", item.get("progress", 0))),
+                    relative_path=Path(item["name"]),
                 )
             )
         return matches
@@ -150,6 +151,31 @@ class QBittorrentClient:
         for match in matches:
             key = match.file_path.resolve(strict=False)
             self._file_index.setdefault(key, []).append(match)
+        return matches
+
+    def matches_for_hash(self, torrent_hash: str) -> list[TorrentMatch]:
+        self.build_file_index()
+        assert self._file_index is not None
+        torrent = self._torrent_by_hash.get(torrent_hash)
+        if torrent is None:
+            current = [item for item in self.torrents() if item["hash"] == torrent_hash]
+            if len(current) != 1:
+                raise QBittorrentError(
+                    f"Expected one qBittorrent torrent for hash {torrent_hash}, "
+                    f"found {len(current)}"
+                )
+            torrent = current[0]
+            return self.refresh_torrent(torrent_hash, torrent=torrent)
+
+        paths = self._paths_by_hash.get(torrent_hash, set())
+        matches: list[TorrentMatch] = []
+        for path in paths:
+            for match in self._file_index.get(path, []):
+                if (
+                    match.client_name == self.config.name
+                    and match.torrent_hash == torrent_hash
+                ):
+                    matches.append(match)
         return matches
 
     def set_location(self, torrent_hash: str, location: Path) -> None:
