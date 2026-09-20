@@ -350,6 +350,14 @@ class Reconciler:
         radarr_folder = self.mapper.to_remote_checked("radarr", future_source.parent)
         return future_source, radarr_folder
 
+    def preflight(self, items: list[PlanItem]) -> None:
+        for item in items:
+            if item.action in {"skip", "finalize_recovery"}:
+                continue
+            future_source, radarr_folder = self._preflight(item)
+            item.notes.append(f"preflight source: {future_source}")
+            item.notes.append(f"Radarr import folder: {radarr_folder}")
+
     def execute(self, item: PlanItem) -> PlanItem:
         if item.action == "skip":
             return item
