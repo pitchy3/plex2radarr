@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .config import ConfigError, load_config
 from .reconcile import Reconciler, SelectionError
+from .state import StateStore
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +104,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         selected_files = _collect_selected_files(args.files, args.files_from)
-        config = load_config(args.config)
-        reconciler = Reconciler(config)
+        config_path = Path(args.config).expanduser().resolve()
+        config = load_config(config_path)
+        state = StateStore(config_path.parent / ".plex2radarr-state.json")
+        reconciler = Reconciler(config, state=state)
         plan = reconciler.plan(selected_paths=selected_files or None)
+        reconciler.preflight(plan)
     except (ConfigError, SelectionError, ValueError, OSError) as exc:
         logger.error("%s", exc)
         return 2
