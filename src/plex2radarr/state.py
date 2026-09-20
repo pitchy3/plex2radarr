@@ -25,6 +25,7 @@ class Transaction:
     torrent_relative_path: Path | None = None
     current_source: Path | None = None
     radarr_movie_id: int | None = None
+    radarr_command_id: int | None = None
 
     @classmethod
     def from_dict(cls, key: str, data: dict[str, Any]) -> Transaction:
@@ -49,6 +50,7 @@ class Transaction:
                 Path(data["current_source"]) if data.get("current_source") else None
             ),
             radarr_movie_id=data.get("radarr_movie_id"),
+            radarr_command_id=data.get("radarr_command_id"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -68,6 +70,7 @@ class Transaction:
             ),
             "current_source": str(self.current_source) if self.current_source else None,
             "radarr_movie_id": self.radarr_movie_id,
+            "radarr_command_id": self.radarr_command_id,
         }
 
 
