@@ -1,9 +1,8 @@
+from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-
-from collections import Counter
-from types import SimpleNamespace
 
 from plex2radarr.cli import (
     _collect_selected_files,
