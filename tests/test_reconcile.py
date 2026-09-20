@@ -5,12 +5,15 @@ import pytest
 
 from plex2radarr.config import (
     AppConfig,
+    PathMapping,
     PlexConfig,
     QBittorrentConfig,
     RadarrConfig,
 )
 from plex2radarr.models import ExternalIds, PlexMovie, TorrentMatch
+from plex2radarr.paths import PathMappingError
 from plex2radarr.reconcile import Reconciler, SelectionError
+from plex2radarr.state import StateStore
 
 
 class FakePlex:
@@ -28,32 +31,40 @@ class FakeRadarr:
     def movies(self):
         return self._movies
 
+    def movie(self, movie_id):
+        return next(movie for movie in self._movies if movie["id"] == movie_id)
+
 
 class FakeQbit:
-    def __init__(self, name, matches):
-        self.config = SimpleNamespace(name=name)
+    def __init__(self, name, matches, matches_by_hash=None, relocation_root="/torrents/movies"):
+        self.config = SimpleNamespace(name=name, relocation_root=relocation_root)
         self._matches = matches
+        self._matches_by_hash = matches_by_hash or {}
 
     def find_matches(self, path):
         return list(self._matches.get(path, []))
 
+    def matches_for_hash(self, torrent_hash):
+        return list(self._matches_by_hash.get(torrent_hash, []))
 
-def config():
+
+def config(path_mappings=()):
     return AppConfig(
         plex=PlexConfig("http://plex", "token", "Movies"),
         radarr=RadarrConfig("http://radarr", "key", "/movies", "Any"),
         qbittorrent=(
             QBittorrentConfig("main", "http://qbit", "u", "p", "/torrents/movies"),
         ),
+        path_mappings=tuple(path_mappings),
     )
 
 
-def test_plan_skips_existing_radarr_movie():
+def test_plan_skips_existing_radarr_movie_with_file():
     movie = PlexMovie("The Matrix", 1999, ExternalIds(tmdb=603), Path("/movies/matrix.mkv"))
     r = Reconciler(
         config(),
         plex=FakePlex([movie]),
-        radarr=FakeRadarr([{"id": 1, "tmdbId": 603}]),
+        radarr=FakeRadarr([{"id": 1, "tmdbId": 603, "hasFile": True}]),
         qbits=[FakeQbit("main", {})],
     )
     plan = r.plan()
@@ -61,10 +72,33 @@ def test_plan_skips_existing_radarr_movie():
     assert plan[0].radarr_movie_id == 1
 
 
+def test_plan_reuses_existing_radarr_movie_without_file():
+    path = Path("/movies/matrix.mkv")
+    movie = PlexMovie("The Matrix", 1999, ExternalIds(tmdb=603), path)
+    r = Reconciler(
+        config(),
+        plex=FakePlex([movie]),
+        radarr=FakeRadarr([{"id": 1, "tmdbId": 603, "hasFile": False}]),
+        qbits=[FakeQbit("main", {})],
+    )
+    plan = r.plan()
+    assert plan[0].action == "move_import"
+    assert plan[0].radarr_movie_id == 1
+    assert "reuse existing missing Radarr movie" in plan[0].reason
+
+
 def test_plan_relocates_when_qbit_owns_source():
     path = Path("/movies/matrix.mkv")
     movie = PlexMovie("The Matrix", 1999, ExternalIds(tmdb=603), path)
-    match = TorrentMatch("main", "abc", "matrix", path, Path("/movies"), 1.0)
+    match = TorrentMatch(
+        "main",
+        "abc",
+        "matrix",
+        path,
+        Path("/movies"),
+        1.0,
+        Path("matrix.mkv"),
+    )
     r = Reconciler(
         config(),
         plex=FakePlex([movie]),
@@ -152,7 +186,7 @@ def test_plan_can_target_multiple_files():
     assert {item.movie.title for item in plan} == {"Alien", "The Matrix"}
 
 
-def test_plan_rejects_requested_file_not_in_plex():
+def test_plan_rejects_requested_file_not_in_plex_or_journal():
     movie = PlexMovie(
         "The Matrix",
         1999,
@@ -168,3 +202,119 @@ def test_plan_rejects_requested_file_not_in_plex():
 
     with pytest.raises(SelectionError, match="not found"):
         r.plan(selected_paths=[Path("/movies/legacy/not-in-plex.mkv")])
+
+
+def test_recovery_can_target_original_path_after_plex_loses_file(tmp_path: Path):
+    original = Path("/movies/legacy/matrix.mkv")
+    moved = Path("/torrents/movies/matrix.mkv")
+    movie = PlexMovie("The Matrix", 1999, ExternalIds(tmdb=603), original)
+    original_match = TorrentMatch(
+        "main",
+        "abc",
+        "matrix",
+        original,
+        Path("/movies/legacy"),
+        1.0,
+        Path("matrix.mkv"),
+    )
+    moved_match = TorrentMatch(
+        "main",
+        "abc",
+        "matrix",
+        moved,
+        Path("/torrents/movies"),
+        1.0,
+        Path("matrix.mkv"),
+    )
+    state = StateStore(tmp_path / "state.json")
+    transaction = state.begin(
+        movie,
+        "relocate_and_import",
+        original_match,
+        None,
+        original,
+    )
+    state.update(
+        transaction.key,
+        stage="torrent_relocated",
+        current_source=str(moved),
+        radarr_movie_id=7,
+    )
+
+    r = Reconciler(
+        config(),
+        plex=FakePlex([]),
+        radarr=FakeRadarr([{"id": 7, "tmdbId": 603, "hasFile": False}]),
+        qbits=[
+            FakeQbit(
+                "main",
+                {},
+                matches_by_hash={"abc": [moved_match]},
+            )
+        ],
+        state=state,
+    )
+
+    plan = r.plan(selected_paths=[original])
+
+    assert len(plan) == 1
+    assert plan[0].action == "relocate_and_import"
+    assert plan[0].source_path == moved
+    assert plan[0].radarr_movie_id == 7
+    assert "resume interrupted reconciliation" in plan[0].reason
+
+
+def test_preflight_rejects_radarr_mapping_that_cannot_see_relocation_root(tmp_path: Path):
+    original = Path("/Volume2/Media/_Movies/Movie/movie.mkv")
+    movie = PlexMovie("Movie", 2020, ExternalIds(tmdb=1), original)
+    match = TorrentMatch(
+        "main",
+        "abc",
+        "Movie",
+        original,
+        Path("/Volume2/Media/_Movies"),
+        1.0,
+        Path("Movie/movie.mkv"),
+    )
+    cfg = AppConfig(
+        plex=PlexConfig("http://plex", "token", "Movies"),
+        radarr=RadarrConfig("http://radarr", "key", "/data/_Movies", "Any"),
+        qbittorrent=(
+            QBittorrentConfig(
+                "main",
+                "http://qbit",
+                "u",
+                "p",
+                "/downloads/torrents",
+            ),
+        ),
+        path_mappings=(
+            PathMapping(
+                "radarr",
+                "/data/_Movies",
+                "/Volume2/Media/_Movies",
+            ),
+            PathMapping(
+                "qbittorrent:main",
+                "/downloads",
+                "/Volume2/Media",
+            ),
+        ),
+    )
+    r = Reconciler(
+        cfg,
+        plex=FakePlex([movie]),
+        radarr=FakeRadarr([]),
+        qbits=[
+            FakeQbit(
+                "main",
+                {original: [match]},
+                relocation_root="/downloads/torrents",
+            )
+        ],
+        state=StateStore(tmp_path / "state.json"),
+    )
+    plan = r.plan()
+
+    with pytest.raises(PathMappingError, match="not covered"):
+        r.preflight(plan)
