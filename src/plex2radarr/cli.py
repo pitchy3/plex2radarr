@@ -79,6 +79,12 @@ def _collect_selected_files(
     return unique
 
 
+def _state_path_for_config(config_path: Path) -> Path:
+    return config_path.with_name(
+        f".plex2radarr-state.{config_path.name}.json"
+    )
+
+
 def _print_item(item, dry_run: bool) -> None:
     prefix = "DRY-RUN" if dry_run else "EXECUTE"
     print(
@@ -106,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         selected_files = _collect_selected_files(args.files, args.files_from)
         config_path = Path(args.config).expanduser().resolve()
         config = load_config(config_path)
-        state = StateStore(config_path.parent / ".plex2radarr-state.json")
+        state = StateStore(_state_path_for_config(config_path))
         reconciler = Reconciler(config, state=state)
         plan = reconciler.plan(selected_paths=selected_files or None)
         reconciler.preflight(plan)
