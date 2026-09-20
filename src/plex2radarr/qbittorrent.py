@@ -69,7 +69,7 @@ class QBittorrentClient:
         torrent_hash = torrent["hash"]
         matches: list[TorrentMatch] = []
         for item in file_items:
-            candidate = self._absolute_file(torrent, item["name"]).resolve(strict=False)
+            candidate = self._absolute_file(torrent, item["name"])
             matches.append(
                 TorrentMatch(
                     client_name=self.config.name,
@@ -96,9 +96,12 @@ class QBittorrentClient:
             torrent_hash = torrent["hash"]
             torrent_by_hash[torrent_hash] = torrent
             matches = self._matches_for_torrent(torrent, self.files(torrent_hash))
-            paths_by_hash[torrent_hash] = {match.file_path for match in matches}
+            paths_by_hash[torrent_hash] = {
+                match.file_path.resolve(strict=False) for match in matches
+            }
             for match in matches:
-                index.setdefault(match.file_path, []).append(match)
+                key = match.file_path.resolve(strict=False)
+                index.setdefault(key, []).append(match)
 
         self._file_index = index
         self._paths_by_hash = paths_by_hash
@@ -140,10 +143,13 @@ class QBittorrentClient:
                 self._file_index.pop(old_path, None)
 
         matches = self._matches_for_torrent(torrent, self.files(torrent_hash))
-        self._paths_by_hash[torrent_hash] = {match.file_path for match in matches}
+        self._paths_by_hash[torrent_hash] = {
+            match.file_path.resolve(strict=False) for match in matches
+        }
         self._torrent_by_hash[torrent_hash] = torrent
         for match in matches:
-            self._file_index.setdefault(match.file_path, []).append(match)
+            key = match.file_path.resolve(strict=False)
+            self._file_index.setdefault(key, []).append(match)
         return matches
 
     def set_location(self, torrent_hash: str, location: Path) -> None:
