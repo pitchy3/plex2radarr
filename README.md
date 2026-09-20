@@ -48,7 +48,7 @@ qBittorrent continues seeding the torrent-path file, while Radarr and Plex use t
 - Multiple qBittorrent instances are supported.
 - API/container path mappings are supported in both directions.
 - Radarr path translation is preflighted during dry-run before any qBittorrent move can occur.
-- Interrupted executions are journaled beside the config file in `.plex2radarr-state.json` and resume automatically on the next run.
+- Interrupted executions are journaled beside the config file in ` .plex2radarr-state.<config-filename>.json` and resume automatically on the next run.
 
 **Review the complete dry-run before using `--execute`. Back up anything you cannot replace.**
 
@@ -252,12 +252,12 @@ plex2radarr --verbose
 Before the first mutating operation for a movie, plex2radarr writes a small transaction journal next to the active config file:
 
 ```text
-.plex2radarr-state.json
+.plex2radarr-state.config.yaml.json
 ```
 
-The journal contains recovery metadata only: external movie IDs, original/current paths, qBittorrent instance and hash, Radarr movie ID, and the last completed stage. Credentials are never written to it.
+The journal is isolated by config filename and contains recovery metadata only: external movie IDs, original/current paths, qBittorrent instance and hash, Radarr movie ID, submitted Radarr command ID, and the last completed stage. Credentials are never written to it.
 
-If a run stops after qBittorrent has moved the payload, Plex may no longer see the original file. On the next run, plex2radarr loads incomplete journal entries before reading Plex, asks qBittorrent for the torrent's current path by hash, reuses an existing Radarr movie when it has no file, and continues the import. You can also target the original Plex path again; it will match the recovery journal even if Plex no longer reports that path.
+If a run stops after qBittorrent has moved the payload, Plex may no longer see the original file. Before a multi-file torrent is moved, plex2radarr journals every Plex movie file owned by that torrent. On the next run, plex2radarr loads incomplete journal entries before reading Plex, asks qBittorrent for the torrent's current path by hash, reuses an existing Radarr movie when it has no file, and continues the import. If Radarr already accepted a ManualImport command, recovery waits on that persisted command ID instead of submitting the import again. You can also target the original Plex path again; it will match the recovery journal even if Plex no longer reports that path.
 
 Completed transactions are removed from the journal. When no incomplete transactions remain, the state file is deleted.
 
