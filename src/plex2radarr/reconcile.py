@@ -358,6 +358,81 @@ class Reconciler:
             item.notes.append(f"preflight source: {future_source}")
             item.notes.append(f"Radarr import folder: {radarr_folder}")
 
+    def _journal_torrent_companions(
+        self,
+        item: PlanItem,
+        qbit: QBittorrentClient,
+        local_relocation_root: Path,
+    ) -> None:
+        assert item.torrent is not None
+        radarr_movies = self.radarr.movies()
+        tmdb_index, imdb_index, _ = self._radarr_indexes(radarr_movies)
+
+        companions: list[tuple[PlexMovie, TorrentMatch, int | None, Path]] = []
+        for movie in self.plex.movies():
+            matches = [
+                match
+                for match in qbit.find_matches(movie.file_path)
+                if match.torrent_hash == item.torrent.torrent_hash
+            ]
+            if not matches:
+                continue
+            if len(matches) != 1:
+                raise SelectionError(
+                    f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                    f"{movie.title} has ambiguous torrent ownership"
+                )
+            match = matches[0]
+            if not movie.ids.tmdb and not movie.ids.imdb:
+                raise SelectionError(
+                    f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                    f"{movie.title} has no stable TMDb/IMDb ID for recovery"
+                )
+
+            existing = self._existing(movie, tmdb_index, imdb_index)
+            if len(existing) > 1:
+                raise SelectionError(
+                    f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                    f"{movie.title} has ambiguous duplicate Radarr identity"
+                )
+            radarr_movie_id = None
+            if len(existing) == 1:
+                if existing[0].get("hasFile"):
+                    raise SelectionError(
+                        f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                        f"{movie.title} is already managed by Radarr with a file"
+                    )
+                radarr_movie_id = int(existing[0]["id"])
+
+            if match.relative_path is None:
+                raise SelectionError(
+                    f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                    f"{movie.title} has no qBittorrent relative path"
+                )
+            future_source = local_relocation_root / match.relative_path
+            self.mapper.to_remote_checked("radarr", future_source.parent)
+            companions.append((movie, match, radarr_movie_id, future_source))
+
+        current_key = self.state.key_for_movie(item.movie)
+        companion_keys = {self.state.key_for_movie(movie) for movie, _, _, _ in companions}
+        if current_key not in companion_keys:
+            raise SelectionError(
+                f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                "the selected movie was not found among the torrent's Plex files"
+            )
+
+        for movie, match, radarr_movie_id, _future_source in companions:
+            key = self.state.key_for_movie(movie)
+            if key == current_key:
+                continue
+            self.state.begin(
+                movie=movie,
+                action="relocate_and_import",
+                torrent=match,
+                radarr_movie_id=radarr_movie_id,
+                source=movie.file_path,
+            )
+
     def execute(self, item: PlanItem) -> PlanItem:
         if item.action == "skip":
             return item
@@ -400,6 +475,11 @@ class Reconciler:
             ):
                 item.notes.append("source already under configured relocation root")
             else:
+                self._journal_torrent_companions(
+                    item,
+                    qbit,
+                    local_relocation_root,
+                )
                 qbit.set_location(item.torrent.torrent_hash, remote_relocation_root)
                 relocated_torrent = qbit.wait_for_save_path(
                     item.torrent.torrent_hash, local_relocation_root
@@ -446,22 +526,38 @@ class Reconciler:
             )
             item.notes.append(f"reusing existing Radarr movie ID {movie_id}")
 
-        radarr_folder = self.mapper.to_remote_checked("radarr", source.parent)
-        candidates = self.radarr.manual_import_candidates(radarr_folder, movie_id)
-        exact = [c for c in candidates if Path(c.get("path", "")).name == source.name]
-        if len(exact) != 1:
-            raise RadarrError(
-                f"Expected exactly one Radarr manual-import candidate for {source}, "
-                f"got {len(exact)}"
-            )
-
-        command = self.radarr.import_file(exact[0], movie_id, mode=import_mode)
-        if command.get("id"):
-            result = self.radarr.wait_for_command(int(command["id"]))
+        transaction = self.state.get(transaction.key) or transaction
+        if transaction.radarr_command_id is not None:
+            result = self.radarr.wait_for_command(transaction.radarr_command_id)
             if result.get("status") != "completed":
                 raise RadarrError(
                     f"Radarr ManualImport failed for {item.movie.title}: {result}"
                 )
+        else:
+            radarr_folder = self.mapper.to_remote_checked("radarr", source.parent)
+            candidates = self.radarr.manual_import_candidates(radarr_folder, movie_id)
+            exact = [c for c in candidates if Path(c.get("path", "")).name == source.name]
+            if len(exact) != 1:
+                raise RadarrError(
+                    f"Expected exactly one Radarr manual-import candidate for {source}, "
+                    f"got {len(exact)}"
+                )
+
+            command = self.radarr.import_file(exact[0], movie_id, mode=import_mode)
+            if command.get("id"):
+                command_id = int(command["id"])
+                self.state.update(
+                    transaction.key,
+                    stage="radarr_import_submitted",
+                    current_source=str(source),
+                    radarr_movie_id=movie_id,
+                    radarr_command_id=command_id,
+                )
+                result = self.radarr.wait_for_command(command_id)
+                if result.get("status") != "completed":
+                    raise RadarrError(
+                        f"Radarr ManualImport failed for {item.movie.title}: {result}"
+                    )
 
         radarr_movie = self.radarr.movie(movie_id)
         if not radarr_movie.get("hasFile"):
