@@ -406,7 +406,7 @@ def test_recovery_does_not_resubmit_persisted_radarr_command(tmp_path: Path):
         def movie(self, movie_id):
             return {"id": movie_id, "tmdbId": 1, "hasFile": True}
 
-        def manual_import_candidates(self, folder, movie_id):
+        def manual_import_candidates(self, folder):
             raise AssertionError("manual import candidates should not be queried")
 
         def import_file(self, candidate, movie_id, mode="copy"):
