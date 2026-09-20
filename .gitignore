@@ -8,5 +8,5 @@ config.yaml
 dist/
 build/
 *.egg-info/
-.plex2radarr-state.json
-.plex2radarr-state.json.tmp
+.plex2radarr-state.*.json
+.plex2radarr-state.*.json.tmp
