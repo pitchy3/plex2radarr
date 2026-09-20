@@ -26,6 +26,7 @@ class TorrentMatch:
     file_path: Path
     save_path: Path
     progress: float
+    relative_path: Path | None = None
 
 
 @dataclass
@@ -35,4 +36,6 @@ class PlanItem:
     reason: str
     torrent: TorrentMatch | None = None
     radarr_movie_id: int | None = None
+    source_path: Path | None = None
+    transaction_key: str | None = None
     notes: list[str] = field(default_factory=list)
