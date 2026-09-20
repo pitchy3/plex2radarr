@@ -85,6 +85,51 @@ def _state_path_for_config(config_path: Path) -> Path:
     )
 
 
+
+def _print_summary(
+    plan,
+    *,
+    dry_run: bool,
+    successful_actions: Counter | None = None,
+    failures: Counter | None = None,
+) -> None:
+    action_counts = Counter(item.action for item in plan)
+    skip_reasons = Counter(item.reason for item in plan if item.action == "skip")
+    total = len(plan)
+
+    print("\nSummary")
+    print(f"  total planned: {total}")
+
+    for action in (
+        "relocate_and_import",
+        "move_import",
+        "import",
+        "finalize_recovery",
+        "skip",
+    ):
+        if action_counts.get(action):
+            print(f"  {action}: {action_counts[action]}")
+
+    if skip_reasons:
+        print("  skipped by reason:")
+        for reason, count in sorted(skip_reasons.items()):
+            print(f"    {count} - {reason}")
+
+    if dry_run:
+        return
+
+    successful_actions = successful_actions or Counter()
+    failures = failures or Counter()
+
+    print("  execution results:")
+    print(f"    succeeded: {sum(successful_actions.values())}")
+    for action, count in sorted(successful_actions.items()):
+        print(f"      {action}: {count}")
+    print(f"    failed: {sum(failures.values())}")
+    for action, count in sorted(failures.items()):
+        print(f"      {action}: {count}")
+
+
 def _print_item(item, dry_run: bool) -> None:
     prefix = "DRY-RUN" if dry_run else "EXECUTE"
     print(
@@ -133,19 +178,33 @@ def main(argv: list[str] | None = None) -> int:
     if not args.execute:
         for item in plan:
             _print_item(item, dry_run=True)
+        _print_summary(plan, dry_run=True)
         print("\nDry-run only. Re-run with --execute to perform mutating operations.")
         return 0
 
-    failures = 0
+    failure_count = 0
+    successful_actions = Counter()
+    failures_by_action = Counter()
+
     for item in plan:
         try:
             executed = reconciler.execute(item)
             _print_item(executed, dry_run=False)
+            if item.action != "skip":
+                successful_actions[item.action] += 1
         except Exception:
-            failures += 1
+            failure_count += 1
+            failures_by_action[item.action] += 1
             logger.exception("Failed to reconcile %s", item.movie.title)
 
-    return 1 if failures else 0
+    _print_summary(
+        plan,
+        dry_run=False,
+        successful_actions=successful_actions,
+        failures=failures_by_action,
+    )
+
+    return 1 if failure_count else 0
 
 
 if __name__ == "__main__":

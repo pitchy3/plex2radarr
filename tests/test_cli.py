@@ -1,8 +1,15 @@
+from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from plex2radarr.cli import _collect_selected_files, _state_path_for_config, build_parser
+from plex2radarr.cli import (
+    _collect_selected_files,
+    _print_summary,
+    _state_path_for_config,
+    build_parser,
+)
 
 
 def test_parser_accepts_single_file():
@@ -58,3 +65,51 @@ def test_state_path_is_isolated_by_config_filename(tmp_path: Path):
     assert first != second
     assert first.name == ".plex2radarr-state.config.yaml.json"
     assert second.name == ".plex2radarr-state.movies-4k.yaml.json"
+
+
+def _summary_item(action: str, reason: str):
+    return SimpleNamespace(action=action, reason=reason)
+
+
+def test_print_summary_reports_actions_and_skip_reasons(capsys):
+    plan = [
+        _summary_item("relocate_and_import", "source is owned by qBittorrent"),
+        _summary_item("relocate_and_import", "source is owned by qBittorrent"),
+        _summary_item("move_import", "unseeded legacy file is inside the library root"),
+        _summary_item("skip", "already exists in Radarr with a movie file"),
+        _summary_item("skip", "multiple qBittorrent torrents own this file"),
+        _summary_item("skip", "multiple qBittorrent torrents own this file"),
+    ]
+
+    _print_summary(plan, dry_run=True)
+
+    output = capsys.readouterr().out
+    assert "total planned: 6" in output
+    assert "relocate_and_import: 2" in output
+    assert "move_import: 1" in output
+    assert "skip: 3" in output
+    assert "1 - already exists in Radarr with a movie file" in output
+    assert "2 - multiple qBittorrent torrents own this file" in output
+    assert "execution results:" not in output
+
+
+def test_print_summary_reports_execution_results(capsys):
+    plan = [
+        _summary_item("relocate_and_import", "source is owned by qBittorrent"),
+        _summary_item("move_import", "unseeded legacy file is inside the library root"),
+        _summary_item("skip", "already exists in Radarr with a movie file"),
+    ]
+
+    _print_summary(
+        plan,
+        dry_run=False,
+        successful_actions=Counter({"relocate_and_import": 1}),
+        failures=Counter({"move_import": 1}),
+    )
+
+    output = capsys.readouterr().out
+    assert "execution results:" in output
+    assert "succeeded: 1" in output
+    assert "relocate_and_import: 1" in output
+    assert "failed: 1" in output
+    assert "move_import: 1" in output
