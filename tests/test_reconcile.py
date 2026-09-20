@@ -10,7 +10,7 @@ from plex2radarr.config import (
     QBittorrentConfig,
     RadarrConfig,
 )
-from plex2radarr.models import ExternalIds, PlexMovie, TorrentMatch
+from plex2radarr.models import ExternalIds, PlanItem, PlexMovie, TorrentMatch
 from plex2radarr.paths import PathMappingError
 from plex2radarr.reconcile import Reconciler, SelectionError
 from plex2radarr.state import StateStore
@@ -318,3 +318,120 @@ def test_preflight_rejects_radarr_mapping_that_cannot_see_relocation_root(tmp_pa
 
     with pytest.raises(PathMappingError, match="not covered"):
         r.preflight(plan)
+
+
+def test_multi_file_torrent_journals_all_affected_plex_movies(tmp_path: Path):
+    first_path = tmp_path / "library" / "one.mkv"
+    second_path = tmp_path / "library" / "two.mkv"
+    first_path.parent.mkdir(parents=True)
+    first_path.write_text("one")
+    second_path.write_text("two")
+
+    first = PlexMovie("One", 2001, ExternalIds(tmdb=1), first_path)
+    second = PlexMovie("Two", 2002, ExternalIds(tmdb=2), second_path)
+    first_match = TorrentMatch(
+        "main",
+        "samehash",
+        "bundle",
+        first_path,
+        first_path.parent,
+        1.0,
+        Path("one.mkv"),
+    )
+    second_match = TorrentMatch(
+        "main",
+        "samehash",
+        "bundle",
+        second_path,
+        second_path.parent,
+        1.0,
+        Path("two.mkv"),
+    )
+    state = StateStore(tmp_path / "state.json")
+    qbit = FakeQbit(
+        "main",
+        {
+            first_path: [first_match],
+            second_path: [second_match],
+        },
+        relocation_root=str(tmp_path / "torrents"),
+    )
+    r = Reconciler(
+        config(),
+        plex=FakePlex([first, second]),
+        radarr=FakeRadarr([]),
+        qbits=[qbit],
+        state=state,
+    )
+    current = PlanItem(
+        first,
+        "relocate_and_import",
+        "test",
+        torrent=first_match,
+    )
+    state.begin(first, current.action, first_match, None, first_path)
+
+    r._journal_torrent_companions(
+        current,
+        qbit,
+        tmp_path / "torrents",
+    )
+
+    keys = {transaction.key for transaction in state.all()}
+    assert keys == {"tmdb:1", "tmdb:2"}
+
+
+def test_recovery_does_not_resubmit_persisted_radarr_command(tmp_path: Path):
+    source = tmp_path / "movie.mkv"
+    source.write_text("movie")
+    movie = PlexMovie("Movie", 2020, ExternalIds(tmdb=1), source)
+    state = StateStore(tmp_path / "state.json")
+    transaction = state.begin(movie, "import", None, 7, source)
+    state.update(
+        transaction.key,
+        stage="radarr_import_submitted",
+        radarr_movie_id=7,
+        radarr_command_id=55,
+    )
+
+    class SubmittedCommandRadarr:
+        def __init__(self):
+            self.import_calls = 0
+            self.waited_for = []
+
+        def wait_for_command(self, command_id):
+            self.waited_for.append(command_id)
+            return {"id": command_id, "status": "completed"}
+
+        def movie(self, movie_id):
+            return {"id": movie_id, "tmdbId": 1, "hasFile": True}
+
+        def manual_import_candidates(self, folder, movie_id):
+            raise AssertionError("manual import candidates should not be queried")
+
+        def import_file(self, candidate, movie_id, mode="copy"):
+            self.import_calls += 1
+            raise AssertionError("import should not be submitted again")
+
+    radarr = SubmittedCommandRadarr()
+    r = Reconciler(
+        config(),
+        plex=FakePlex([]),
+        radarr=radarr,
+        qbits=[],
+        state=state,
+    )
+    item = PlanItem(
+        movie,
+        "import",
+        "resume",
+        radarr_movie_id=7,
+        source_path=source,
+        transaction_key=transaction.key,
+    )
+
+    r.execute(item)
+
+    assert radarr.waited_for == [55]
+    assert radarr.import_calls == 0
+    assert state.all() == []
