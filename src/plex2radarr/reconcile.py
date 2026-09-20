@@ -175,10 +175,23 @@ class Reconciler:
                 item.notes.append("source already under configured relocation root")
             else:
                 qbit.set_location(item.torrent.torrent_hash, remote_relocation_root)
-                qbit.wait_for_save_path(item.torrent.torrent_hash, local_relocation_root)
-                source = self._find_relocated_by_basename(
-                    qbit, item.torrent.torrent_hash, source.name
+                relocated_torrent = qbit.wait_for_save_path(
+                    item.torrent.torrent_hash, local_relocation_root
                 )
+                refreshed = qbit.refresh_torrent(
+                    item.torrent.torrent_hash, torrent=relocated_torrent
+                )
+                relocated_files = [
+                    match.file_path
+                    for match in refreshed
+                    if match.file_path.name == source.name
+                ]
+                if len(relocated_files) != 1:
+                    raise RuntimeError(
+                        f"Could not uniquely locate {source.name} after "
+                        "qBittorrent relocation"
+                    )
+                source = relocated_files[0]
                 item.notes.append(f"qBittorrent source relocated to {source}")
 
         added = self.radarr.add_movie(item.movie)
@@ -203,19 +216,3 @@ class Reconciler:
 
         item.notes.append(f"Radarr manual import requested with importMode={import_mode}")
         return item
-
-    @staticmethod
-    def _find_relocated_by_basename(
-        qbit: QBittorrentClient, torrent_hash: str, basename: str
-    ) -> Path:
-        torrents = {t["hash"]: t for t in qbit.torrents()}
-        torrent = torrents[torrent_hash]
-        matches = []
-        for f in qbit.files(torrent_hash):
-            if Path(f["name"]).name == basename:
-                matches.append(qbit._absolute_file(torrent, f["name"]))
-        if len(matches) != 1:
-            raise RuntimeError(
-                f"Could not uniquely locate {basename} after qBittorrent relocation"
-            )
-        return matches[0]
