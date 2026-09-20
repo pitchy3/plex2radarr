@@ -30,7 +30,11 @@ class Reconciler:
         self.mapper = PathMapper(config.path_mappings)
         self.plex = plex or PlexClient(config.plex, self.mapper)
         self.radarr = radarr or RadarrClient(config.radarr)
-        self.qbits = qbits or [QBittorrentClient(q, self.mapper) for q in config.qbittorrent]
+        self.qbits = (
+            qbits
+            if qbits is not None
+            else [QBittorrentClient(q, self.mapper) for q in config.qbittorrent]
+        )
         self.qbit_by_name = {q.config.name: q for q in self.qbits}
         self.state = state or StateStore()
 
