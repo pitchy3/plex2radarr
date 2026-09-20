@@ -70,3 +70,32 @@ def test_state_store_removes_file_when_last_transaction_completes(tmp_path: Path
     store.remove(transaction.key)
 
     assert not path.exists()
+
+
+def test_state_store_persists_radarr_command_id(tmp_path: Path):
+    path = tmp_path / "state.json"
+    movie = PlexMovie(
+        "Warm Bodies",
+        2013,
+        ExternalIds(tmdb=82654),
+        Path("/library/Warm.Bodies/movie.mkv"),
+    )
+    store = StateStore(path)
+    transaction = store.begin(
+        movie,
+        "import",
+        None,
+        677,
+        movie.file_path,
+    )
+    store.update(
+        transaction.key,
+        stage="radarr_import_submitted",
+        radarr_command_id=1234,
+    )
+
+    restored = StateStore(path).get(transaction.key)
+
+    assert restored is not None
+    assert restored.stage == "radarr_import_submitted"
+    assert restored.radarr_command_id == 1234
