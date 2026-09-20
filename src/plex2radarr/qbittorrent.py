@@ -32,6 +32,9 @@ class QBittorrentClient:
         self.mapper = mapper
         self.session = session or requests.Session()
         self.base = config.url.rstrip("/") + "/api/v2"
+        self._file_index: dict[Path, list[TorrentMatch]] | None = None
+        self._paths_by_hash: dict[str, set[Path]] = {}
+        self._torrent_by_hash: dict[str, dict] = {}
         self._login()
 
     def _login(self) -> None:
@@ -60,26 +63,93 @@ class QBittorrentClient:
         remote = Path(torrent["save_path"]) / rel_name
         return self.mapper.to_local(f"qbittorrent:{self.config.name}", remote)
 
-    def find_matches(self, local_path: Path) -> list[TorrentMatch]:
-        wanted = local_path.resolve(strict=False)
+    def _matches_for_torrent(
+        self, torrent: dict, file_items: list[dict]
+    ) -> list[TorrentMatch]:
+        torrent_hash = torrent["hash"]
         matches: list[TorrentMatch] = []
+        for item in file_items:
+            candidate = self._absolute_file(torrent, item["name"])
+            matches.append(
+                TorrentMatch(
+                    client_name=self.config.name,
+                    torrent_hash=torrent_hash,
+                    torrent_name=torrent.get("name", torrent_hash),
+                    file_path=candidate,
+                    save_path=self.mapper.to_local(
+                        f"qbittorrent:{self.config.name}", torrent["save_path"]
+                    ),
+                    progress=float(torrent.get("progress", item.get("progress", 0))),
+                )
+            )
+        return matches
+
+    def build_file_index(self) -> None:
+        if self._file_index is not None:
+            return
+
+        index: dict[Path, list[TorrentMatch]] = {}
+        paths_by_hash: dict[str, set[Path]] = {}
+        torrent_by_hash: dict[str, dict] = {}
+
         for torrent in self.torrents():
             torrent_hash = torrent["hash"]
-            for item in self.files(torrent_hash):
-                candidate = self._absolute_file(torrent, item["name"]).resolve(strict=False)
-                if candidate == wanted:
-                    matches.append(
-                        TorrentMatch(
-                            client_name=self.config.name,
-                            torrent_hash=torrent_hash,
-                            torrent_name=torrent.get("name", torrent_hash),
-                            file_path=candidate,
-                            save_path=self.mapper.to_local(
-                                f"qbittorrent:{self.config.name}", torrent["save_path"]
-                            ),
-                            progress=float(torrent.get("progress", item.get("progress", 0))),
-                        )
-                    )
+            torrent_by_hash[torrent_hash] = torrent
+            matches = self._matches_for_torrent(torrent, self.files(torrent_hash))
+            paths_by_hash[torrent_hash] = {
+                match.file_path.resolve(strict=False) for match in matches
+            }
+            for match in matches:
+                key = match.file_path.resolve(strict=False)
+                index.setdefault(key, []).append(match)
+
+        self._file_index = index
+        self._paths_by_hash = paths_by_hash
+        self._torrent_by_hash = torrent_by_hash
+
+    def find_matches(self, local_path: Path) -> list[TorrentMatch]:
+        self.build_file_index()
+        assert self._file_index is not None
+        wanted = local_path.resolve(strict=False)
+        return list(self._file_index.get(wanted, []))
+
+    def refresh_torrent(
+        self, torrent_hash: str, torrent: dict | None = None
+    ) -> list[TorrentMatch]:
+        self.build_file_index()
+        assert self._file_index is not None
+
+        if torrent is None:
+            current = [item for item in self.torrents() if item["hash"] == torrent_hash]
+            if len(current) != 1:
+                raise QBittorrentError(
+                    f"Expected one qBittorrent torrent for hash {torrent_hash}, "
+                    f"found {len(current)}"
+                )
+            torrent = current[0]
+
+        for old_path in self._paths_by_hash.get(torrent_hash, set()):
+            remaining = [
+                match
+                for match in self._file_index.get(old_path, [])
+                if not (
+                    match.client_name == self.config.name
+                    and match.torrent_hash == torrent_hash
+                )
+            ]
+            if remaining:
+                self._file_index[old_path] = remaining
+            else:
+                self._file_index.pop(old_path, None)
+
+        matches = self._matches_for_torrent(torrent, self.files(torrent_hash))
+        self._paths_by_hash[torrent_hash] = {
+            match.file_path.resolve(strict=False) for match in matches
+        }
+        self._torrent_by_hash[torrent_hash] = torrent
+        for match in matches:
+            key = match.file_path.resolve(strict=False)
+            self._file_index.setdefault(key, []).append(match)
         return matches
 
     def set_location(self, torrent_hash: str, location: Path) -> None:

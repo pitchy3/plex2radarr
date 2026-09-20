@@ -244,6 +244,12 @@ plex2radarr --verbose
 | Requested file is not present in Plex | Abort selection with an error |
 | Source file cannot be accessed during execute | Skip |
 
+## qBittorrent query efficiency
+
+qBittorrent ownership is indexed once per configured instance, per plex2radarr run. On the first ownership lookup, plex2radarr fetches the torrent list once and fetches each torrent's file list once, then builds an in-memory exact-path index. Later Plex movies use that index instead of re-querying every torrent.
+
+During `--execute`, if a torrent is relocated, only that torrent's cached paths are refreshed after qBittorrent confirms the move. The rest of the index is reused.
+
 ## Why qBittorrent relocation comes first
 
 Given:
