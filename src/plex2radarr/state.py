@@ -27,7 +27,7 @@ class Transaction:
     radarr_movie_id: int | None = None
 
     @classmethod
-    def from_dict(cls, key: str, data: dict[str, Any]) -> "Transaction":
+    def from_dict(cls, key: str, data: dict[str, Any]) -> Transaction:
         return cls(
             key=key,
             title=data["title"],
