@@ -539,7 +539,7 @@ class Reconciler:
                 )
         else:
             radarr_folder = self.mapper.to_remote_checked("radarr", source.parent)
-            candidates = self.radarr.manual_import_candidates(radarr_folder, movie_id)
+            candidates = self.radarr.manual_import_candidates(radarr_folder)
             exact = [c for c in candidates if Path(c.get("path", "")).name == source.name]
             if len(exact) != 1:
                 raise RadarrError(

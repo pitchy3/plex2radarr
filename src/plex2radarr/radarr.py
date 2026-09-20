@@ -72,13 +72,11 @@ class RadarrClient:
         }
         return self._post("/movie", payload)
 
-    def manual_import_candidates(self, folder: Path, movie_id: int) -> list[dict]:
+    def manual_import_candidates(self, folder: Path) -> list[dict]:
         return self._get(
             "/manualimport",
             folder=str(folder),
-            movieId=movie_id,
             filterExistingFiles="true",
-            replaceExistingFiles="false",
         )
 
     def import_file(self, candidate: dict, movie_id: int, mode: str = "copy") -> dict:
