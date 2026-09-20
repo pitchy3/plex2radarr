@@ -368,7 +368,7 @@ class Reconciler:
             item.notes.append("cleared completed recovery transaction")
             return item
 
-        future_source, _ = self._preflight(item)
+        self._preflight(item)
         source = item.source_path or item.movie.file_path
 
         if not source.exists() and not (
