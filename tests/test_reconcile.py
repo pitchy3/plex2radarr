@@ -817,7 +817,7 @@ def test_companion_safety_refreshes_current_state_for_multifile_torrent(tmp_path
     assert radarr.calls == 2
 
 
-def test_single_file_torrent_companion_check_avoids_full_refresh(tmp_path: Path):
+def test_single_file_torrent_companion_check_avoids_plex_refresh(tmp_path: Path):
     source = tmp_path / "library" / "one.mkv"
     source.parent.mkdir(parents=True)
     source.write_text("one")
@@ -866,7 +866,7 @@ def test_single_file_torrent_companion_check_avoids_full_refresh(tmp_path: Path)
     r._journal_torrent_companions(item=PlanItem(movie, "relocate_and_import", "test", torrent=match), qbit=qbit, local_relocation_root=tmp_path / "torrents")
 
     assert plex.calls == 0
-    assert radarr.calls == 0
+    assert radarr.calls == 1
 
 
 def test_single_file_torrent_revalidates_radarr_before_relocation(tmp_path: Path):
