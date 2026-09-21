@@ -51,9 +51,12 @@ class Reconciler:
         self._radarr_movies_snapshot: list[dict] | None = None
 
 
-    def _plex_scan(self) -> tuple[list[PlexMovie], list[PlexScanIssue]]:
+    def _plex_scan(
+        self, *, refresh: bool = False
+    ) -> tuple[list[PlexMovie], list[PlexScanIssue]]:
         if (
-            self._plex_movies_snapshot is not None
+            not refresh
+            and self._plex_movies_snapshot is not None
             and self._plex_issues_snapshot is not None
         ):
             return self._plex_movies_snapshot, self._plex_issues_snapshot
@@ -83,8 +86,8 @@ class Reconciler:
         return self._plex_movies_snapshot, self._plex_issues_snapshot
 
 
-    def _radarr_movies(self) -> list[dict]:
-        if self._radarr_movies_snapshot is None:
+    def _radarr_movies(self, *, refresh: bool = False) -> list[dict]:
+        if refresh or self._radarr_movies_snapshot is None:
             self._radarr_movies_snapshot = list(self.radarr.movies())
         return self._radarr_movies_snapshot
 
@@ -498,11 +501,32 @@ class Reconciler:
         local_relocation_root: Path,
     ) -> None:
         assert item.torrent is not None
-        radarr_movies = self._radarr_movies()
+
+        torrent_files = qbit.matches_for_hash(item.torrent.torrent_hash)
+        if not torrent_files:
+            raise SelectionError(
+                f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                "qBittorrent no longer reports any files for this torrent"
+            )
+        if len(torrent_files) == 1:
+            only = torrent_files[0]
+            if (
+                item.torrent.relative_path is not None
+                and only.relative_path != item.torrent.relative_path
+            ):
+                raise SelectionError(
+                    f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                    "the torrent's only file no longer matches the selected movie"
+                )
+            return
+
+        # Multi-file torrents need current Plex and Radarr state immediately
+        # before relocation because either service may have changed since planning.
+        radarr_movies = self._radarr_movies(refresh=True)
         tmdb_index, imdb_index, _ = self._radarr_indexes(radarr_movies)
 
         companions: list[tuple[PlexMovie, TorrentMatch, int | None, Path]] = []
-        plex_movies, plex_issues = self._plex_scan()
+        plex_movies, plex_issues = self._plex_scan(refresh=True)
 
         eligible_paths = {
             movie.file_path.resolve(strict=False)
