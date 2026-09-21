@@ -107,7 +107,7 @@ def _print_summary(
             + plex_scan_stats.multiple_applicable_files
             + plex_scan_stats.no_media_movies
         )
-        print(f"  excluded before planning: {excluded}")
+        print(f"  excluded from automatic import: {excluded}")
         if plex_scan_stats.outside_root_movies:
             print(
                 "    outside configured Radarr root: "
