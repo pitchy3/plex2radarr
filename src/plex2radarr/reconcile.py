@@ -457,7 +457,22 @@ class Reconciler:
         tmdb_index, imdb_index, _ = self._radarr_indexes(radarr_movies)
 
         companions: list[tuple[PlexMovie, TorrentMatch, int | None, Path]] = []
-        for movie in self.plex.movies():
+        plex_movies, plex_issues = self._plex_scan()
+        for issue in plex_issues:
+            for path in issue.file_paths:
+                issue_matches = [
+                    match
+                    for match in qbit.find_matches(path)
+                    if match.torrent_hash == item.torrent.torrent_hash
+                ]
+                if issue_matches:
+                    raise SelectionError(
+                        f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                        f"{issue.title} has multiple Plex files in the configured "
+                        "Radarr root"
+                    )
+
+        for movie in plex_movies:
             matches = [
                 match
                 for match in qbit.find_matches(movie.file_path)
