@@ -681,3 +681,43 @@ def test_radarr_snapshot_updates_after_movie_refresh():
     r._update_radarr_snapshot({"id": 1, "tmdbId": 1, "hasFile": True})
 
     assert r._radarr_movies() == [{"id": 1, "tmdbId": 1, "hasFile": True}]
+
+
+def test_radarr_snapshot_updates_immediately_after_add_before_import_failure(tmp_path: Path):
+    source = tmp_path / "movie.mkv"
+    source.write_text("movie")
+    movie = PlexMovie("Movie", 2020, ExternalIds(tmdb=1), source)
+
+    class AddThenFailRadarr:
+        def __init__(self):
+            self._movies = []
+
+        def movies(self):
+            return list(self._movies)
+
+        def add_movie(self, movie):
+            added = {"id": 7, "tmdbId": 1, "imdbId": None, "hasFile": False}
+            self._movies.append(dict(added))
+            return added
+
+        def manual_import_candidates(self, folder):
+            return []
+
+    radarr = AddThenFailRadarr()
+    r = Reconciler(
+        config(),
+        plex=FakePlex([movie]),
+        radarr=radarr,
+        qbits=[],
+        state=StateStore(tmp_path / "state.json"),
+    )
+    r._radarr_movies()
+
+    item = PlanItem(movie, "move_import", "test")
+
+    with pytest.raises(Exception):
+        r.execute(item)
+
+    assert r._radarr_movies() == [
+        {"id": 7, "tmdbId": 1, "imdbId": None, "hasFile": False}
+    ]
