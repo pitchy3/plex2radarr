@@ -520,7 +520,7 @@ class Reconciler:
                 )
 
             # Even a single-file torrent can become unsafe after planning if
-            # Radarr starts managing the selected movie before execution.
+            # Plex or Radarr changes before execution.
             radarr_movies = self._radarr_movies(refresh=True)
             tmdb_index, imdb_index, _ = self._radarr_indexes(radarr_movies)
             existing = self._existing(item.movie, tmdb_index, imdb_index)
@@ -536,6 +536,54 @@ class Reconciler:
                         f"{item.movie.title} is already managed by Radarr with a file"
                     )
                 item.radarr_movie_id = int(existing[0]["id"])
+
+            plex_movies, plex_issues = self._plex_scan(refresh=True)
+            matching_issues = [
+                issue
+                for issue in plex_issues
+                if (
+                    item.movie.ids.tmdb
+                    and issue.ids.tmdb == item.movie.ids.tmdb
+                )
+                or (
+                    not item.movie.ids.tmdb
+                    and item.movie.ids.imdb
+                    and issue.ids.imdb == item.movie.ids.imdb
+                )
+            ]
+            if matching_issues:
+                raise SelectionError(
+                    f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                    f"{item.movie.title} has multiple Plex files in the configured "
+                    "Radarr root"
+                )
+
+            current_matches = [
+                movie
+                for movie in plex_movies
+                if (
+                    item.movie.ids.tmdb
+                    and movie.ids.tmdb == item.movie.ids.tmdb
+                )
+                or (
+                    not item.movie.ids.tmdb
+                    and item.movie.ids.imdb
+                    and movie.ids.imdb == item.movie.ids.imdb
+                )
+            ]
+            if len(current_matches) != 1:
+                raise SelectionError(
+                    f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                    f"{item.movie.title} is no longer uniquely represented in Plex"
+                )
+            if (
+                current_matches[0].file_path.resolve(strict=False)
+                != item.movie.file_path.resolve(strict=False)
+            ):
+                raise SelectionError(
+                    f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                    f"{item.movie.title} now points to a different Plex file"
+                )
             return
 
         # Multi-file torrents need current Plex and Radarr state immediately
