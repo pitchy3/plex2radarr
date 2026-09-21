@@ -46,9 +46,21 @@ class Reconciler:
         self.state = state or StateStore()
         self.plex_scan_stats: PlexScanStats | None = None
         self._all_plex_files: list[PlexMovie] = []
+        self._plex_movies_snapshot: list[PlexMovie] | None = None
+        self._plex_issues_snapshot: list[PlexScanIssue] | None = None
+        self._radarr_movies_snapshot: list[dict] | None = None
 
 
-    def _plex_scan(self) -> tuple[list[PlexMovie], list[PlexScanIssue]]:
+    def _plex_scan(
+        self, *, refresh: bool = False
+    ) -> tuple[list[PlexMovie], list[PlexScanIssue]]:
+        if (
+            not refresh
+            and self._plex_movies_snapshot is not None
+            and self._plex_issues_snapshot is not None
+        ):
+            return self._plex_movies_snapshot, self._plex_issues_snapshot
+
         if not hasattr(self.plex, "scan"):
             movies = list(self.plex.movies())
             self.plex_scan_stats = PlexScanStats(
@@ -59,7 +71,9 @@ class Reconciler:
                 no_media_movies=0,
             )
             self._all_plex_files = list(movies)
-            return movies, []
+            self._plex_movies_snapshot = list(movies)
+            self._plex_issues_snapshot = []
+            return self._plex_movies_snapshot, self._plex_issues_snapshot
 
         radarr_local_root = self.mapper.to_local_checked(
             "radarr", self.config.radarr.root_folder
@@ -67,7 +81,25 @@ class Reconciler:
         scan = self.plex.scan(radarr_local_root)
         self.plex_scan_stats = scan.stats
         self._all_plex_files = list(scan.all_files)
-        return list(scan.movies), list(scan.issues)
+        self._plex_movies_snapshot = list(scan.movies)
+        self._plex_issues_snapshot = list(scan.issues)
+        return self._plex_movies_snapshot, self._plex_issues_snapshot
+
+
+    def _radarr_movies(self, *, refresh: bool = False) -> list[dict]:
+        if refresh or self._radarr_movies_snapshot is None:
+            self._radarr_movies_snapshot = list(self.radarr.movies())
+        return self._radarr_movies_snapshot
+
+    def _update_radarr_snapshot(self, movie: dict) -> None:
+        if self._radarr_movies_snapshot is None or movie.get("id") is None:
+            return
+        movie_id = int(movie["id"])
+        for index, current in enumerate(self._radarr_movies_snapshot):
+            if current.get("id") is not None and int(current["id"]) == movie_id:
+                self._radarr_movies_snapshot[index] = dict(movie)
+                return
+        self._radarr_movies_snapshot.append(dict(movie))
 
     @staticmethod
     def _issue_plan(issue: PlexScanIssue, source: Path | None = None) -> PlanItem:
@@ -276,7 +308,7 @@ class Reconciler:
         )
 
     def plan(self, selected_paths: Iterable[Path] | None = None) -> list[PlanItem]:
-        radarr_movies = self.radarr.movies()
+        radarr_movies = self._radarr_movies()
         tmdb_index, imdb_index, radarr_by_id = self._radarr_indexes(radarr_movies)
 
         recovery_transactions, recovery_matched = self._select_recovery_transactions(
@@ -469,11 +501,98 @@ class Reconciler:
         local_relocation_root: Path,
     ) -> None:
         assert item.torrent is not None
-        radarr_movies = self.radarr.movies()
+
+        torrent_files = qbit.matches_for_hash(item.torrent.torrent_hash)
+        if not torrent_files:
+            raise SelectionError(
+                f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                "qBittorrent no longer reports any files for this torrent"
+            )
+        if len(torrent_files) == 1:
+            only = torrent_files[0]
+            if (
+                item.torrent.relative_path is not None
+                and only.relative_path != item.torrent.relative_path
+            ):
+                raise SelectionError(
+                    f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                    "the torrent's only file no longer matches the selected movie"
+                )
+
+            # Even a single-file torrent can become unsafe after planning if
+            # Plex or Radarr changes before execution.
+            radarr_movies = self._radarr_movies(refresh=True)
+            tmdb_index, imdb_index, _ = self._radarr_indexes(radarr_movies)
+            existing = self._existing(item.movie, tmdb_index, imdb_index)
+            if len(existing) > 1:
+                raise SelectionError(
+                    f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                    f"{item.movie.title} has ambiguous duplicate Radarr identity"
+                )
+            if len(existing) == 1:
+                if existing[0].get("hasFile"):
+                    raise SelectionError(
+                        f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                        f"{item.movie.title} is already managed by Radarr with a file"
+                    )
+                item.radarr_movie_id = int(existing[0]["id"])
+
+            plex_movies, plex_issues = self._plex_scan(refresh=True)
+            matching_issues = [
+                issue
+                for issue in plex_issues
+                if (
+                    item.movie.ids.tmdb
+                    and issue.ids.tmdb == item.movie.ids.tmdb
+                )
+                or (
+                    not item.movie.ids.tmdb
+                    and item.movie.ids.imdb
+                    and issue.ids.imdb == item.movie.ids.imdb
+                )
+            ]
+            if matching_issues:
+                raise SelectionError(
+                    f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                    f"{item.movie.title} has multiple Plex files in the configured "
+                    "Radarr root"
+                )
+
+            current_matches = [
+                movie
+                for movie in plex_movies
+                if (
+                    item.movie.ids.tmdb
+                    and movie.ids.tmdb == item.movie.ids.tmdb
+                )
+                or (
+                    not item.movie.ids.tmdb
+                    and item.movie.ids.imdb
+                    and movie.ids.imdb == item.movie.ids.imdb
+                )
+            ]
+            if len(current_matches) != 1:
+                raise SelectionError(
+                    f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                    f"{item.movie.title} is no longer uniquely represented in Plex"
+                )
+            if (
+                current_matches[0].file_path.resolve(strict=False)
+                != item.movie.file_path.resolve(strict=False)
+            ):
+                raise SelectionError(
+                    f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                    f"{item.movie.title} now points to a different Plex file"
+                )
+            return
+
+        # Multi-file torrents need current Plex and Radarr state immediately
+        # before relocation because either service may have changed since planning.
+        radarr_movies = self._radarr_movies(refresh=True)
         tmdb_index, imdb_index, _ = self._radarr_indexes(radarr_movies)
 
         companions: list[tuple[PlexMovie, TorrentMatch, int | None, Path]] = []
-        plex_movies, plex_issues = self._plex_scan()
+        plex_movies, plex_issues = self._plex_scan(refresh=True)
 
         eligible_paths = {
             movie.file_path.resolve(strict=False)
@@ -657,6 +776,7 @@ class Reconciler:
             added = self.radarr.add_movie(item.movie)
             movie_id = int(added["id"])
             item.radarr_movie_id = movie_id
+            self._update_radarr_snapshot(added)
             self.state.update(
                 transaction.key,
                 stage="radarr_movie_added",
@@ -705,6 +825,7 @@ class Reconciler:
                     )
 
         radarr_movie = self.radarr.movie(movie_id)
+        self._update_radarr_snapshot(radarr_movie)
         if not radarr_movie.get("hasFile"):
             raise RadarrError(
                 f"Radarr import completed but movie {movie_id} still has no file"

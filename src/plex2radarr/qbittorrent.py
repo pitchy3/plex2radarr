@@ -52,6 +52,23 @@ class QBittorrentClient:
         r.raise_for_status()
         return r.json()
 
+    def torrent(self, torrent_hash: str) -> dict | None:
+        r = self.session.get(
+            self.base + "/torrents/info",
+            params={"hashes": torrent_hash},
+            timeout=30,
+        )
+        r.raise_for_status()
+        items = r.json()
+        if not items:
+            return None
+        if len(items) != 1:
+            raise QBittorrentError(
+                f"Expected at most one qBittorrent torrent for hash {torrent_hash}, "
+                f"found {len(items)}"
+            )
+        return items[0]
+
     def files(self, torrent_hash: str) -> list[dict]:
         r = self.session.get(
             self.base + "/torrents/files", params={"hash": torrent_hash}, timeout=30
@@ -192,9 +209,8 @@ class QBittorrentClient:
         deadline = time.monotonic() + timeout
         expected = str(expected_root).rstrip("/")
         while time.monotonic() < deadline:
-            for torrent in self.torrents():
-                if torrent["hash"] != torrent_hash:
-                    continue
+            torrent = self.torrent(torrent_hash)
+            if torrent is not None:
                 current = str(
                     self.mapper.to_local(
                         f"qbittorrent:{self.config.name}", torrent["save_path"]
@@ -202,7 +218,7 @@ class QBittorrentClient:
                 ).rstrip("/")
                 if current == expected:
                     return torrent
-            time.sleep(2)
+            time.sleep(1)
         raise QBittorrentError(
             f"Timed out waiting for {self.config.name} torrent {torrent_hash} relocation"
         )

@@ -20,6 +20,7 @@ from plex2radarr.models import (
     TorrentMatch,
 )
 from plex2radarr.paths import PathMappingError
+from plex2radarr.radarr import RadarrError
 from plex2radarr.reconcile import Reconciler, SelectionError
 from plex2radarr.state import StateStore
 
@@ -61,7 +62,26 @@ class FakeQbit:
         return list(self._matches.get(path, []))
 
     def matches_for_hash(self, torrent_hash):
-        return list(self._matches_by_hash.get(torrent_hash, []))
+        explicit = self._matches_by_hash.get(torrent_hash)
+        if explicit is not None:
+            return list(explicit)
+
+        matches = []
+        seen = set()
+        for values in self._matches.values():
+            for match in values:
+                if match.torrent_hash != torrent_hash:
+                    continue
+                key = (
+                    match.client_name,
+                    match.torrent_hash,
+                    match.relative_path,
+                    match.file_path,
+                )
+                if key not in seen:
+                    seen.add(key)
+                    matches.append(match)
+        return matches
 
 
 def config(path_mappings=()):
@@ -601,3 +621,408 @@ def test_torrent_relocation_rejects_outside_root_plex_companion(tmp_path: Path):
             qbit,
             tmp_path / "torrents",
         )
+
+
+def test_plex_scan_snapshot_is_reused():
+    movie = PlexMovie(
+        "Movie",
+        2020,
+        ExternalIds(tmdb=1),
+        Path("/movies/movie.mkv"),
+    )
+    scan = PlexScanResult(
+        movies=(movie,),
+        issues=(),
+        all_files=(movie,),
+        stats=PlexScanStats(
+            total_movies=1,
+            eligible_movies=1,
+            outside_root_movies=0,
+            multiple_applicable_files=0,
+            no_media_movies=0,
+        ),
+    )
+
+    class CountingScanPlex:
+        def __init__(self):
+            self.calls = 0
+
+        def scan(self, radarr_local_root):
+            self.calls += 1
+            return scan
+
+    plex = CountingScanPlex()
+    r = Reconciler(
+        config(),
+        plex=plex,
+        radarr=FakeRadarr([]),
+        qbits=[FakeQbit("main", {})],
+    )
+
+    first = r._plex_scan()
+    second = r._plex_scan()
+
+    assert first == second
+    assert plex.calls == 1
+
+
+def test_radarr_movie_snapshot_is_reused():
+    class CountingRadarr(FakeRadarr):
+        def __init__(self, movies):
+            super().__init__(movies)
+            self.calls = 0
+
+        def movies(self):
+            self.calls += 1
+            return super().movies()
+
+    radarr = CountingRadarr([{"id": 1, "tmdbId": 1, "hasFile": False}])
+    r = Reconciler(
+        config(),
+        plex=FakePlex([]),
+        radarr=radarr,
+        qbits=[],
+    )
+
+    assert r._radarr_movies() == [{"id": 1, "tmdbId": 1, "hasFile": False}]
+    assert r._radarr_movies() == [{"id": 1, "tmdbId": 1, "hasFile": False}]
+    assert radarr.calls == 1
+
+
+def test_radarr_snapshot_updates_after_movie_refresh():
+    radarr = FakeRadarr([{"id": 1, "tmdbId": 1, "hasFile": False}])
+    r = Reconciler(
+        config(),
+        plex=FakePlex([]),
+        radarr=radarr,
+        qbits=[],
+    )
+    r._radarr_movies()
+    r._update_radarr_snapshot({"id": 1, "tmdbId": 1, "hasFile": True})
+
+    assert r._radarr_movies() == [{"id": 1, "tmdbId": 1, "hasFile": True}]
+
+
+def test_radarr_snapshot_updates_immediately_after_add_before_import_failure(tmp_path: Path):
+    source = tmp_path / "movie.mkv"
+    source.write_text("movie")
+    movie = PlexMovie("Movie", 2020, ExternalIds(tmdb=1), source)
+
+    class AddThenFailRadarr:
+        def __init__(self):
+            self._movies = []
+
+        def movies(self):
+            return list(self._movies)
+
+        def add_movie(self, movie):
+            added = {"id": 7, "tmdbId": 1, "imdbId": None, "hasFile": False}
+            self._movies.append(dict(added))
+            return added
+
+        def manual_import_candidates(self, folder):
+            return []
+
+    radarr = AddThenFailRadarr()
+    r = Reconciler(
+        config(),
+        plex=FakePlex([movie]),
+        radarr=radarr,
+        qbits=[],
+        state=StateStore(tmp_path / "state.json"),
+    )
+    r._radarr_movies()
+
+    item = PlanItem(movie, "move_import", "test")
+
+    with pytest.raises(RadarrError):
+        r.execute(item)
+
+    assert r._radarr_movies() == [
+        {"id": 7, "tmdbId": 1, "imdbId": None, "hasFile": False}
+    ]
+
+
+def test_companion_safety_refreshes_current_state_for_multifile_torrent(tmp_path: Path):
+    first_path = tmp_path / "library" / "one.mkv"
+    second_path = tmp_path / "library" / "two.mkv"
+    first_path.parent.mkdir(parents=True)
+    first_path.write_text("one")
+    second_path.write_text("two")
+
+    first = PlexMovie("One", 2001, ExternalIds(tmdb=1), first_path)
+    second = PlexMovie("Two", 2002, ExternalIds(tmdb=2), second_path)
+    first_match = TorrentMatch(
+        "main", "samehash", "bundle", first_path, first_path.parent, 1.0, Path("one.mkv")
+    )
+    second_match = TorrentMatch(
+        "main", "samehash", "bundle", second_path, second_path.parent, 1.0, Path("two.mkv")
+    )
+
+    class RefreshingScanPlex:
+        def __init__(self):
+            self.calls = 0
+
+        def scan(self, radarr_local_root):
+            self.calls += 1
+            return PlexScanResult(
+                movies=(first, second),
+                issues=(),
+                all_files=(first, second),
+                stats=PlexScanStats(
+                    total_movies=2,
+                    eligible_movies=2,
+                    outside_root_movies=0,
+                    multiple_applicable_files=0,
+                    no_media_movies=0,
+                ),
+            )
+
+    class RefreshingRadarr(FakeRadarr):
+        def __init__(self):
+            super().__init__([{"id": 2, "tmdbId": 2, "hasFile": True}])
+            self.calls = 0
+
+        def movies(self):
+            self.calls += 1
+            return super().movies()
+
+    class MultiFileQbit(FakeQbit):
+        def matches_for_hash(self, torrent_hash):
+            return [first_match, second_match]
+
+    plex = RefreshingScanPlex()
+    radarr = RefreshingRadarr()
+    qbit = MultiFileQbit(
+        "main",
+        {first_path: [first_match], second_path: [second_match]},
+        relocation_root=str(tmp_path / "torrents"),
+    )
+    r = Reconciler(
+        config(),
+        plex=plex,
+        radarr=radarr,
+        qbits=[qbit],
+        state=StateStore(tmp_path / "state.json"),
+    )
+    r._plex_scan()
+    r._radarr_movies()
+
+    item = PlanItem(first, "relocate_and_import", "test", torrent=first_match)
+
+    with pytest.raises(SelectionError, match="already managed by Radarr"):
+        r._journal_torrent_companions(item, qbit, tmp_path / "torrents")
+
+    assert plex.calls == 2
+    assert radarr.calls == 2
+
+
+def test_single_file_torrent_companion_check_refreshes_current_state(tmp_path: Path):
+    source = tmp_path / "library" / "one.mkv"
+    source.parent.mkdir(parents=True)
+    source.write_text("one")
+    movie = PlexMovie("One", 2001, ExternalIds(tmdb=1), source)
+    match = TorrentMatch(
+        "main", "samehash", "one", source, source.parent, 1.0, Path("one.mkv")
+    )
+
+    class CountingPlex(FakePlex):
+        def __init__(self, movies):
+            super().__init__(movies)
+            self.calls = 0
+
+        def movies(self):
+            self.calls += 1
+            return super().movies()
+
+    class CountingRadarr(FakeRadarr):
+        def __init__(self):
+            super().__init__([])
+            self.calls = 0
+
+        def movies(self):
+            self.calls += 1
+            return super().movies()
+
+    class SingleFileQbit(FakeQbit):
+        def matches_for_hash(self, torrent_hash):
+            return [match]
+
+    plex = CountingPlex([movie])
+    radarr = CountingRadarr()
+    qbit = SingleFileQbit(
+        "main",
+        {source: [match]},
+        relocation_root=str(tmp_path / "torrents"),
+    )
+    r = Reconciler(
+        config(),
+        plex=plex,
+        radarr=radarr,
+        qbits=[qbit],
+        state=StateStore(tmp_path / "state.json"),
+    )
+
+    r._journal_torrent_companions(item=PlanItem(movie, "relocate_and_import", "test", torrent=match), qbit=qbit, local_relocation_root=tmp_path / "torrents")
+
+    assert plex.calls == 1
+    assert radarr.calls == 1
+
+
+def test_single_file_torrent_revalidates_radarr_before_relocation(tmp_path: Path):
+    source = tmp_path / "library" / "one.mkv"
+    source.parent.mkdir(parents=True)
+    source.write_text("one")
+    movie = PlexMovie("One", 2001, ExternalIds(tmdb=1), source)
+    match = TorrentMatch(
+        "main", "samehash", "one", source, source.parent, 1.0, Path("one.mkv")
+    )
+
+    class SingleFileQbit(FakeQbit):
+        def matches_for_hash(self, torrent_hash):
+            return [match]
+
+    class ChangingRadarr(FakeRadarr):
+        def __init__(self):
+            super().__init__([{"id": 7, "tmdbId": 1, "hasFile": True}])
+            self.calls = 0
+
+        def movies(self):
+            self.calls += 1
+            return super().movies()
+
+    radarr = ChangingRadarr()
+    qbit = SingleFileQbit(
+        "main",
+        {source: [match]},
+        relocation_root=str(tmp_path / "torrents"),
+    )
+    r = Reconciler(
+        config(),
+        plex=FakePlex([movie]),
+        radarr=radarr,
+        qbits=[qbit],
+        state=StateStore(tmp_path / "state.json"),
+    )
+
+    item = PlanItem(movie, "relocate_and_import", "test", torrent=match)
+
+    with pytest.raises(SelectionError, match="already managed by Radarr"):
+        r._journal_torrent_companions(item, qbit, tmp_path / "torrents")
+
+    assert radarr.calls == 1
+
+
+def test_single_file_torrent_refreshes_missing_radarr_movie_id(tmp_path: Path):
+    source = tmp_path / "library" / "one.mkv"
+    source.parent.mkdir(parents=True)
+    source.write_text("one")
+    movie = PlexMovie("One", 2001, ExternalIds(tmdb=1), source)
+    match = TorrentMatch(
+        "main", "samehash", "one", source, source.parent, 1.0, Path("one.mkv")
+    )
+
+    class SingleFileQbit(FakeQbit):
+        def matches_for_hash(self, torrent_hash):
+            return [match]
+
+    radarr = FakeRadarr([{"id": 7, "tmdbId": 1, "hasFile": False}])
+    qbit = SingleFileQbit(
+        "main",
+        {source: [match]},
+        relocation_root=str(tmp_path / "torrents"),
+    )
+    r = Reconciler(
+        config(),
+        plex=FakePlex([movie]),
+        radarr=radarr,
+        qbits=[qbit],
+        state=StateStore(tmp_path / "state.json"),
+    )
+
+    item = PlanItem(movie, "relocate_and_import", "test", torrent=match)
+    r._journal_torrent_companions(item, qbit, tmp_path / "torrents")
+
+    assert item.radarr_movie_id == 7
+
+
+def test_single_file_torrent_rejects_new_plex_ambiguity(tmp_path: Path):
+    source = tmp_path / "library" / "one.mkv"
+    second = tmp_path / "library" / "one-alt.mkv"
+    source.parent.mkdir(parents=True)
+    source.write_text("one")
+    second.write_text("two")
+
+    movie = PlexMovie("One", 2001, ExternalIds(tmdb=1), source)
+    match = TorrentMatch(
+        "main", "samehash", "one", source, source.parent, 1.0, Path("one.mkv")
+    )
+
+    initial_scan = PlexScanResult(
+        movies=(movie,),
+        issues=(),
+        all_files=(movie,),
+        stats=PlexScanStats(
+            total_movies=1,
+            eligible_movies=1,
+            outside_root_movies=0,
+            multiple_applicable_files=0,
+            no_media_movies=0,
+        ),
+    )
+    ambiguous_issue = PlexScanIssue(
+        title="One",
+        year=2001,
+        ids=ExternalIds(tmdb=1),
+        file_paths=(source, second),
+        reason="multiple Plex files in configured Radarr root",
+    )
+    refreshed_scan = PlexScanResult(
+        movies=(),
+        issues=(ambiguous_issue,),
+        all_files=(
+            movie,
+            PlexMovie("One", 2001, ExternalIds(tmdb=1), second),
+        ),
+        stats=PlexScanStats(
+            total_movies=1,
+            eligible_movies=0,
+            outside_root_movies=0,
+            multiple_applicable_files=1,
+            no_media_movies=0,
+        ),
+    )
+
+    class ChangingPlex:
+        def __init__(self):
+            self.calls = 0
+
+        def scan(self, radarr_local_root):
+            self.calls += 1
+            return initial_scan if self.calls == 1 else refreshed_scan
+
+    class SingleFileQbit(FakeQbit):
+        def matches_for_hash(self, torrent_hash):
+            return [match]
+
+    plex = ChangingPlex()
+    qbit = SingleFileQbit(
+        "main",
+        {source: [match]},
+        relocation_root=str(tmp_path / "torrents"),
+    )
+    r = Reconciler(
+        config(),
+        plex=plex,
+        radarr=FakeRadarr([]),
+        qbits=[qbit],
+        state=StateStore(tmp_path / "state.json"),
+    )
+
+    r._plex_scan()
+    item = PlanItem(movie, "relocate_and_import", "test", torrent=match)
+
+    with pytest.raises(SelectionError, match="multiple Plex files"):
+        r._journal_torrent_companions(item, qbit, tmp_path / "torrents")
+
+    assert plex.calls == 2

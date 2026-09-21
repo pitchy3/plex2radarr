@@ -96,5 +96,5 @@ class RadarrClient:
             cmd = self._get(f"/command/{command_id}")
             if cmd.get("status") in {"completed", "failed", "aborted"}:
                 return cmd
-            time.sleep(2)
+            time.sleep(1)
         raise RadarrError(f"Timed out waiting for Radarr command {command_id}")
