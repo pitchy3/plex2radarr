@@ -435,3 +435,41 @@ def test_recovery_does_not_resubmit_persisted_radarr_command(tmp_path: Path):
     assert radarr.waited_for == [55]
     assert radarr.import_calls == 0
     assert state.all() == []
+
+
+def test_plan_lists_all_qbittorrent_owners_for_ambiguous_file():
+    path = Path("/movies/matrix.mkv")
+    movie = PlexMovie("The Matrix", 1999, ExternalIds(tmdb=603), path)
+    first = TorrentMatch(
+        "main",
+        "aaaaaaaaaaaaaaaa",
+        "Matrix tracker A",
+        path,
+        Path("/movies"),
+        1.0,
+        Path("matrix.mkv"),
+    )
+    second = TorrentMatch(
+        "main",
+        "bbbbbbbbbbbbbbbb",
+        "Matrix tracker B",
+        path,
+        Path("/movies"),
+        1.0,
+        Path("matrix.mkv"),
+    )
+    r = Reconciler(
+        config(),
+        plex=FakePlex([movie]),
+        radarr=FakeRadarr([]),
+        qbits=[FakeQbit("main", {path: [first, second]})],
+    )
+
+    plan = r.plan()
+
+    assert plan[0].action == "skip"
+    assert plan[0].reason == "multiple qBittorrent torrents own this file"
+    assert plan[0].notes == [
+        "qBittorrent owner: main / Matrix tracker A [aaaaaaaaaaaa]",
+        "qBittorrent owner: main / Matrix tracker B [bbbbbbbbbbbb]",
+    ]
