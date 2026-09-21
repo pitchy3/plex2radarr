@@ -10,7 +10,15 @@ from plex2radarr.config import (
     QBittorrentConfig,
     RadarrConfig,
 )
-from plex2radarr.models import ExternalIds, PlanItem, PlexMovie, TorrentMatch
+from plex2radarr.models import (
+    ExternalIds,
+    PlanItem,
+    PlexMovie,
+    PlexScanIssue,
+    PlexScanResult,
+    PlexScanStats,
+    TorrentMatch,
+)
 from plex2radarr.paths import PathMappingError
 from plex2radarr.reconcile import Reconciler, SelectionError
 from plex2radarr.state import StateStore
@@ -22,6 +30,14 @@ class FakePlex:
 
     def movies(self):
         return self._movies
+
+
+class FakeScanPlex:
+    def __init__(self, scan_result):
+        self._scan_result = scan_result
+
+    def scan(self, radarr_local_root):
+        return self._scan_result
 
 
 class FakeRadarr:
@@ -435,3 +451,153 @@ def test_recovery_does_not_resubmit_persisted_radarr_command(tmp_path: Path):
     assert radarr.waited_for == [55]
     assert radarr.import_calls == 0
     assert state.all() == []
+
+
+def test_plan_lists_all_qbittorrent_owners_for_ambiguous_file():
+    path = Path("/movies/matrix.mkv")
+    movie = PlexMovie("The Matrix", 1999, ExternalIds(tmdb=603), path)
+    first = TorrentMatch(
+        "main",
+        "aaaaaaaaaaaaaaaa",
+        "Matrix tracker A",
+        path,
+        Path("/movies"),
+        1.0,
+        Path("matrix.mkv"),
+    )
+    second = TorrentMatch(
+        "main",
+        "bbbbbbbbbbbbbbbb",
+        "Matrix tracker B",
+        path,
+        Path("/movies"),
+        1.0,
+        Path("matrix.mkv"),
+    )
+    r = Reconciler(
+        config(),
+        plex=FakePlex([movie]),
+        radarr=FakeRadarr([]),
+        qbits=[FakeQbit("main", {path: [first, second]})],
+    )
+
+    plan = r.plan()
+
+    assert plan[0].action == "skip"
+    assert plan[0].reason == "multiple qBittorrent torrents own this file"
+    assert plan[0].notes == [
+        "qBittorrent owner: main / Matrix tracker A [aaaaaaaaaaaa]",
+        "qBittorrent owner: main / Matrix tracker B [bbbbbbbbbbbb]",
+    ]
+
+
+def test_recovery_movie_does_not_also_get_multi_file_skip(tmp_path: Path):
+    first = Path("/movies/movie-a.mkv")
+    second = Path("/movies/movie-b.mkv")
+    movie = PlexMovie("Movie", 2020, ExternalIds(tmdb=1), first)
+    issue = PlexScanIssue(
+        title="Movie",
+        year=2020,
+        ids=ExternalIds(tmdb=1),
+        file_paths=(first, second),
+        reason="multiple Plex files in configured Radarr root",
+    )
+    scan = PlexScanResult(
+        movies=(),
+        issues=(issue,),
+        all_files=(
+            movie,
+            PlexMovie("Movie", 2020, ExternalIds(tmdb=1), second),
+        ),
+        stats=PlexScanStats(
+            total_movies=1,
+            eligible_movies=0,
+            outside_root_movies=0,
+            multiple_applicable_files=1,
+            no_media_movies=0,
+        ),
+    )
+    state = StateStore(tmp_path / "state.json")
+    state.begin(movie, "move_import", None, 7, first)
+
+    r = Reconciler(
+        config(),
+        plex=FakeScanPlex(scan),
+        radarr=FakeRadarr([{"id": 7, "tmdbId": 1, "hasFile": False}]),
+        qbits=[FakeQbit("main", {})],
+        state=state,
+    )
+
+    plan = r.plan()
+
+    assert len(plan) == 1
+    assert plan[0].action == "move_import"
+    assert "resume interrupted reconciliation" in plan[0].reason
+
+
+def test_torrent_relocation_rejects_outside_root_plex_companion(tmp_path: Path):
+    selected_path = Path("/movies/selected.mkv")
+    outside_path = Path("/other-library/companion.mkv")
+    selected = PlexMovie("Selected", 2020, ExternalIds(tmdb=1), selected_path)
+    outside = PlexMovie("Companion", 2021, ExternalIds(tmdb=2), outside_path)
+    selected_match = TorrentMatch(
+        "main",
+        "samehash",
+        "bundle",
+        selected_path,
+        Path("/movies"),
+        1.0,
+        Path("selected.mkv"),
+    )
+    outside_match = TorrentMatch(
+        "main",
+        "samehash",
+        "bundle",
+        outside_path,
+        Path("/other-library"),
+        1.0,
+        Path("companion.mkv"),
+    )
+    scan = PlexScanResult(
+        movies=(selected,),
+        issues=(),
+        all_files=(selected, outside),
+        stats=PlexScanStats(
+            total_movies=2,
+            eligible_movies=1,
+            outside_root_movies=1,
+            multiple_applicable_files=0,
+            no_media_movies=0,
+        ),
+    )
+    qbit = FakeQbit(
+        "main",
+        {
+            selected_path: [selected_match],
+            outside_path: [outside_match],
+        },
+        relocation_root=str(tmp_path / "torrents"),
+    )
+    r = Reconciler(
+        config(),
+        plex=FakeScanPlex(scan),
+        radarr=FakeRadarr([]),
+        qbits=[qbit],
+        state=StateStore(tmp_path / "state.json"),
+    )
+    item = PlanItem(
+        selected,
+        "relocate_and_import",
+        "test",
+        torrent=selected_match,
+    )
+
+    with pytest.raises(
+        SelectionError,
+        match="outside the configured Radarr root",
+    ):
+        r._journal_torrent_companions(
+            item,
+            qbit,
+            tmp_path / "torrents",
+        )

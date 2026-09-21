@@ -90,6 +90,7 @@ def _print_summary(
     plan,
     *,
     dry_run: bool,
+    plex_scan_stats=None,
     successful_actions: Counter | None = None,
     failures: Counter | None = None,
 ) -> None:
@@ -98,6 +99,27 @@ def _print_summary(
     total = len(plan)
 
     print("\nSummary")
+    if plex_scan_stats is not None:
+        print(f"  Plex library movies seen: {plex_scan_stats.total_movies}")
+        print(f"  eligible for this Radarr root: {plex_scan_stats.eligible_movies}")
+        excluded = (
+            plex_scan_stats.outside_root_movies
+            + plex_scan_stats.multiple_applicable_files
+            + plex_scan_stats.no_media_movies
+        )
+        print(f"  excluded from automatic import: {excluded}")
+        if plex_scan_stats.outside_root_movies:
+            print(
+                "    outside configured Radarr root: "
+                f"{plex_scan_stats.outside_root_movies}"
+            )
+        if plex_scan_stats.multiple_applicable_files:
+            print(
+                "    multiple applicable Plex files: "
+                f"{plex_scan_stats.multiple_applicable_files}"
+            )
+        if plex_scan_stats.no_media_movies:
+            print(f"    no media file: {plex_scan_stats.no_media_movies}")
     print(f"  total planned: {total}")
 
     for action in (
@@ -178,7 +200,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.execute:
         for item in plan:
             _print_item(item, dry_run=True)
-        _print_summary(plan, dry_run=True)
+        _print_summary(
+            plan,
+            dry_run=True,
+            plex_scan_stats=reconciler.plex_scan_stats,
+        )
         print("\nDry-run only. Re-run with --execute to perform mutating operations.")
         return 0
 
@@ -202,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=False,
         successful_actions=successful_actions,
         failures=failures_by_action,
+        plex_scan_stats=reconciler.plex_scan_stats,
     )
 
     return 1 if failure_count else 0

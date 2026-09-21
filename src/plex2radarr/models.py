@@ -19,6 +19,32 @@ class PlexMovie:
 
 
 @dataclass(frozen=True)
+class PlexScanIssue:
+    title: str
+    year: int | None
+    ids: ExternalIds
+    file_paths: tuple[Path, ...]
+    reason: str
+
+
+@dataclass(frozen=True)
+class PlexScanStats:
+    total_movies: int
+    eligible_movies: int
+    outside_root_movies: int
+    multiple_applicable_files: int
+    no_media_movies: int
+
+
+@dataclass(frozen=True)
+class PlexScanResult:
+    movies: tuple[PlexMovie, ...]
+    issues: tuple[PlexScanIssue, ...]
+    all_files: tuple[PlexMovie, ...]
+    stats: PlexScanStats
+
+
+@dataclass(frozen=True)
 class TorrentMatch:
     client_name: str
     torrent_hash: str
