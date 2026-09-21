@@ -62,7 +62,26 @@ class FakeQbit:
         return list(self._matches.get(path, []))
 
     def matches_for_hash(self, torrent_hash):
-        return list(self._matches_by_hash.get(torrent_hash, []))
+        explicit = self._matches_by_hash.get(torrent_hash)
+        if explicit is not None:
+            return list(explicit)
+
+        matches = []
+        seen = set()
+        for values in self._matches.values():
+            for match in values:
+                if match.torrent_hash != torrent_hash:
+                    continue
+                key = (
+                    match.client_name,
+                    match.torrent_hash,
+                    match.relative_path,
+                    match.file_path,
+                )
+                if key not in seen:
+                    seen.add(key)
+                    matches.append(match)
+        return matches
 
 
 def config(path_mappings=()):
