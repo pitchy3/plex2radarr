@@ -601,3 +601,83 @@ def test_torrent_relocation_rejects_outside_root_plex_companion(tmp_path: Path):
             qbit,
             tmp_path / "torrents",
         )
+
+
+def test_plex_scan_snapshot_is_reused():
+    movie = PlexMovie(
+        "Movie",
+        2020,
+        ExternalIds(tmdb=1),
+        Path("/movies/movie.mkv"),
+    )
+    scan = PlexScanResult(
+        movies=(movie,),
+        issues=(),
+        all_files=(movie,),
+        stats=PlexScanStats(
+            total_movies=1,
+            eligible_movies=1,
+            outside_root_movies=0,
+            multiple_applicable_files=0,
+            no_media_movies=0,
+        ),
+    )
+
+    class CountingScanPlex:
+        def __init__(self):
+            self.calls = 0
+
+        def scan(self, radarr_local_root):
+            self.calls += 1
+            return scan
+
+    plex = CountingScanPlex()
+    r = Reconciler(
+        config(),
+        plex=plex,
+        radarr=FakeRadarr([]),
+        qbits=[FakeQbit("main", {})],
+    )
+
+    first = r._plex_scan()
+    second = r._plex_scan()
+
+    assert first == second
+    assert plex.calls == 1
+
+
+def test_radarr_movie_snapshot_is_reused():
+    class CountingRadarr(FakeRadarr):
+        def __init__(self, movies):
+            super().__init__(movies)
+            self.calls = 0
+
+        def movies(self):
+            self.calls += 1
+            return super().movies()
+
+    radarr = CountingRadarr([{"id": 1, "tmdbId": 1, "hasFile": False}])
+    r = Reconciler(
+        config(),
+        plex=FakePlex([]),
+        radarr=radarr,
+        qbits=[],
+    )
+
+    assert r._radarr_movies() == [{"id": 1, "tmdbId": 1, "hasFile": False}]
+    assert r._radarr_movies() == [{"id": 1, "tmdbId": 1, "hasFile": False}]
+    assert radarr.calls == 1
+
+
+def test_radarr_snapshot_updates_after_movie_refresh():
+    radarr = FakeRadarr([{"id": 1, "tmdbId": 1, "hasFile": False}])
+    r = Reconciler(
+        config(),
+        plex=FakePlex([]),
+        radarr=radarr,
+        qbits=[],
+    )
+    r._radarr_movies()
+    r._update_radarr_snapshot({"id": 1, "tmdbId": 1, "hasFile": True})
+
+    assert r._radarr_movies() == [{"id": 1, "tmdbId": 1, "hasFile": True}]
