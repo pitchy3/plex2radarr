@@ -40,6 +40,7 @@ class PlexScanStats:
 class PlexScanResult:
     movies: tuple[PlexMovie, ...]
     issues: tuple[PlexScanIssue, ...]
+    all_files: tuple[PlexMovie, ...]
     stats: PlexScanStats
 
 
