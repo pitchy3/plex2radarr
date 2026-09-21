@@ -45,6 +45,7 @@ class Reconciler:
         self.qbit_by_name = {q.config.name: q for q in self.qbits}
         self.state = state or StateStore()
         self.plex_scan_stats: PlexScanStats | None = None
+        self._all_plex_files: list[PlexMovie] = []
 
 
     def _plex_scan(self) -> tuple[list[PlexMovie], list[PlexScanIssue]]:
@@ -57,6 +58,7 @@ class Reconciler:
                 multiple_applicable_files=0,
                 no_media_movies=0,
             )
+            self._all_plex_files = list(movies)
             return movies, []
 
         radarr_local_root = self.mapper.to_local_checked(
@@ -64,6 +66,7 @@ class Reconciler:
         )
         scan = self.plex.scan(radarr_local_root)
         self.plex_scan_stats = scan.stats
+        self._all_plex_files = list(scan.all_files)
         return list(scan.movies), list(scan.issues)
 
     @staticmethod
@@ -295,7 +298,14 @@ class Reconciler:
         selected_issue_plans: list[PlanItem] = []
         issue_matched = set(recovery_matched)
         if selected_paths is None:
-            selected_issue_plans = [self._issue_plan(issue) for issue in plex_issues]
+            for issue in plex_issues:
+                issue_plan = self._issue_plan(issue)
+                try:
+                    issue_key = self.state.key_for_movie(issue_plan.movie)
+                except ValueError:
+                    issue_key = None
+                if issue_key not in recovery_keys:
+                    selected_issue_plans.append(issue_plan)
         else:
             requested = {
                 path.expanduser().resolve(strict=False)
@@ -308,7 +318,13 @@ class Reconciler:
                     if path.resolve(strict=False) in requested
                 ]
                 if matches:
-                    selected_issue_plans.append(self._issue_plan(issue, matches[0]))
+                    issue_plan = self._issue_plan(issue, matches[0])
+                    try:
+                        issue_key = self.state.key_for_movie(issue_plan.movie)
+                    except ValueError:
+                        issue_key = None
+                    if issue_key not in recovery_keys:
+                        selected_issue_plans.append(issue_plan)
                     issue_matched.update(
                         path.resolve(strict=False) for path in matches
                     )
@@ -458,6 +474,32 @@ class Reconciler:
 
         companions: list[tuple[PlexMovie, TorrentMatch, int | None, Path]] = []
         plex_movies, plex_issues = self._plex_scan()
+
+        eligible_paths = {
+            movie.file_path.resolve(strict=False)
+            for movie in plex_movies
+        }
+        issue_paths = {
+            path.resolve(strict=False)
+            for issue in plex_issues
+            for path in issue.file_paths
+        }
+        for plex_file in self._all_plex_files:
+            normalized = plex_file.file_path.resolve(strict=False)
+            if normalized in eligible_paths or normalized in issue_paths:
+                continue
+            outside_matches = [
+                match
+                for match in qbit.find_matches(plex_file.file_path)
+                if match.torrent_hash == item.torrent.torrent_hash
+            ]
+            if outside_matches:
+                raise SelectionError(
+                    f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                    f"{plex_file.title} has a Plex file outside the configured "
+                    "Radarr root that is owned by the same torrent"
+                )
+
         for issue in plex_issues:
             for path in issue.file_paths:
                 issue_matches = [
