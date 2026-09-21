@@ -686,6 +686,7 @@ class Reconciler:
             added = self.radarr.add_movie(item.movie)
             movie_id = int(added["id"])
             item.radarr_movie_id = movie_id
+            self._update_radarr_snapshot(added)
             self.state.update(
                 transaction.key,
                 stage="radarr_movie_added",
