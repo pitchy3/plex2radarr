@@ -17,6 +17,7 @@ class CountingQBittorrentClient(QBittorrentClient):
         self.file_data = files_by_hash
         self.torrent_calls = 0
         self.file_calls: Counter[str] = Counter()
+        self.single_torrent_calls: Counter[str] = Counter()
         super().__init__(
             QBittorrentConfig(
                 name="main",
@@ -38,6 +39,13 @@ class CountingQBittorrentClient(QBittorrentClient):
     def files(self, torrent_hash: str) -> list[dict]:
         self.file_calls[torrent_hash] += 1
         return [dict(item) for item in self.file_data[torrent_hash]]
+
+    def torrent(self, torrent_hash: str) -> dict | None:
+        self.single_torrent_calls[torrent_hash] += 1
+        for item in self.torrent_data:
+            if item["hash"] == torrent_hash:
+                return dict(item)
+        return None
 
 
 def make_client() -> CountingQBittorrentClient:
@@ -135,3 +143,18 @@ def test_index_uses_resolved_key_but_preserves_mapped_file_path(tmp_path: Path):
 
     assert match.file_path == mapped_root / "a.mkv"
     assert mapper.to_remote("radarr", match.file_path.parent) == Path("/movies")
+
+
+def test_wait_for_save_path_polls_only_requested_torrent():
+    client = make_client()
+    client.torrent_data[0]["save_path"] = "/relocated"
+
+    result = client.wait_for_save_path(
+        "aaa",
+        Path("/relocated"),
+        timeout=1,
+    )
+
+    assert result["hash"] == "aaa"
+    assert client.single_torrent_calls == Counter({"aaa": 1})
+    assert client.torrent_calls == 0
