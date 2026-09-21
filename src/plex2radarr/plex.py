@@ -53,6 +53,7 @@ class PlexClient:
 
         movies: list[PlexMovie] = []
         issues: list[PlexScanIssue] = []
+        all_files: list[PlexMovie] = []
         outside_root_movies = 0
         multiple_applicable_files = 0
         no_media_movies = 0
@@ -75,6 +76,16 @@ class PlexClient:
             )
             ids = self._ids(item)
             year = getattr(item, "year", None)
+
+            all_files.extend(
+                PlexMovie(
+                    title=item.title,
+                    year=year,
+                    ids=ids,
+                    file_path=path,
+                )
+                for path in local_paths
+            )
 
             if len(applicable) == 1:
                 movies.append(
@@ -104,6 +115,7 @@ class PlexClient:
         return PlexScanResult(
             movies=tuple(movies),
             issues=tuple(issues),
+            all_files=tuple(all_files),
             stats=PlexScanStats(
                 total_movies=len(items),
                 eligible_movies=len(movies),
