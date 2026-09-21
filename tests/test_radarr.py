@@ -33,7 +33,8 @@ def test_manual_import_candidates_scans_folder_without_movie_id():
     assert "movieId" not in captured["params"]
 
 
-def test_quality_profile_id_is_cached():
+
+def test_quality_profile_id_re_resolves_current_configuration():
     client = RadarrClient(
         RadarrConfig(
             url="http://radarr",
@@ -46,10 +47,15 @@ def test_quality_profile_id_is_cached():
 
     def fake_get(path, **params):
         calls.append((path, params))
-        return [{"id": 7, "name": "Any"}]
+        if len(calls) == 1:
+            return [{"id": 7, "name": "Any"}]
+        return [{"id": 9, "name": "Any"}]
 
     client._get = fake_get
 
     assert client.quality_profile_id() == 7
-    assert client.quality_profile_id() == 7
-    assert calls == [("/qualityprofile", {})]
+    assert client.quality_profile_id() == 9
+    assert calls == [
+        ("/qualityprofile", {}),
+        ("/qualityprofile", {}),
+    ]
