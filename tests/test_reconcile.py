@@ -817,7 +817,7 @@ def test_companion_safety_refreshes_current_state_for_multifile_torrent(tmp_path
     assert radarr.calls == 2
 
 
-def test_single_file_torrent_companion_check_avoids_plex_refresh(tmp_path: Path):
+def test_single_file_torrent_companion_check_refreshes_current_state(tmp_path: Path):
     source = tmp_path / "library" / "one.mkv"
     source.parent.mkdir(parents=True)
     source.write_text("one")
@@ -865,7 +865,7 @@ def test_single_file_torrent_companion_check_avoids_plex_refresh(tmp_path: Path)
 
     r._journal_torrent_companions(item=PlanItem(movie, "relocate_and_import", "test", torrent=match), qbit=qbit, local_relocation_root=tmp_path / "torrents")
 
-    assert plex.calls == 0
+    assert plex.calls == 1
     assert radarr.calls == 1
 
 
@@ -944,3 +944,85 @@ def test_single_file_torrent_refreshes_missing_radarr_movie_id(tmp_path: Path):
     r._journal_torrent_companions(item, qbit, tmp_path / "torrents")
 
     assert item.radarr_movie_id == 7
+
+
+def test_single_file_torrent_rejects_new_plex_ambiguity(tmp_path: Path):
+    source = tmp_path / "library" / "one.mkv"
+    second = tmp_path / "library" / "one-alt.mkv"
+    source.parent.mkdir(parents=True)
+    source.write_text("one")
+    second.write_text("two")
+
+    movie = PlexMovie("One", 2001, ExternalIds(tmdb=1), source)
+    match = TorrentMatch(
+        "main", "samehash", "one", source, source.parent, 1.0, Path("one.mkv")
+    )
+
+    initial_scan = PlexScanResult(
+        movies=(movie,),
+        issues=(),
+        all_files=(movie,),
+        stats=PlexScanStats(
+            total_movies=1,
+            eligible_movies=1,
+            outside_root_movies=0,
+            multiple_applicable_files=0,
+            no_media_movies=0,
+        ),
+    )
+    ambiguous_issue = PlexScanIssue(
+        title="One",
+        year=2001,
+        ids=ExternalIds(tmdb=1),
+        file_paths=(source, second),
+        reason="multiple Plex files in configured Radarr root",
+    )
+    refreshed_scan = PlexScanResult(
+        movies=(),
+        issues=(ambiguous_issue,),
+        all_files=(
+            movie,
+            PlexMovie("One", 2001, ExternalIds(tmdb=1), second),
+        ),
+        stats=PlexScanStats(
+            total_movies=1,
+            eligible_movies=0,
+            outside_root_movies=0,
+            multiple_applicable_files=1,
+            no_media_movies=0,
+        ),
+    )
+
+    class ChangingPlex:
+        def __init__(self):
+            self.calls = 0
+
+        def scan(self, radarr_local_root):
+            self.calls += 1
+            return initial_scan if self.calls == 1 else refreshed_scan
+
+    class SingleFileQbit(FakeQbit):
+        def matches_for_hash(self, torrent_hash):
+            return [match]
+
+    plex = ChangingPlex()
+    qbit = SingleFileQbit(
+        "main",
+        {source: [match]},
+        relocation_root=str(tmp_path / "torrents"),
+    )
+    r = Reconciler(
+        config(),
+        plex=plex,
+        radarr=FakeRadarr([]),
+        qbits=[qbit],
+        state=StateStore(tmp_path / "state.json"),
+    )
+
+    r._plex_scan()
+    item = PlanItem(movie, "relocate_and_import", "test", torrent=match)
+
+    with pytest.raises(SelectionError, match="multiple Plex files"):
+        r._journal_torrent_companions(item, qbit, tmp_path / "torrents")
+
+    assert plex.calls == 2
