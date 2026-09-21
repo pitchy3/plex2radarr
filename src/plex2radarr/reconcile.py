@@ -518,6 +518,24 @@ class Reconciler:
                     f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
                     "the torrent's only file no longer matches the selected movie"
                 )
+
+            # Even a single-file torrent can become unsafe after planning if
+            # Radarr starts managing the selected movie before execution.
+            radarr_movies = self._radarr_movies(refresh=True)
+            tmdb_index, imdb_index, _ = self._radarr_indexes(radarr_movies)
+            existing = self._existing(item.movie, tmdb_index, imdb_index)
+            if len(existing) > 1:
+                raise SelectionError(
+                    f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                    f"{item.movie.title} has ambiguous duplicate Radarr identity"
+                )
+            if len(existing) == 1:
+                if existing[0].get("hasFile"):
+                    raise SelectionError(
+                        f"Cannot safely relocate torrent {item.torrent.torrent_name}: "
+                        f"{item.movie.title} is already managed by Radarr with a file"
+                    )
+                item.radarr_movie_id = int(existing[0]["id"])
             return
 
         # Multi-file torrents need current Plex and Radarr state immediately
