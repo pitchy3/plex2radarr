@@ -19,6 +19,7 @@ class RadarrClient:
         self.session = session or requests.Session()
         self.base = config.url.rstrip("/") + "/api/v3"
         self.headers = {"X-Api-Key": config.api_key}
+        self._quality_profile_id: int | None = None
 
     def _get(self, path: str, **params):
         r = self.session.get(self.base + path, headers=self.headers, params=params, timeout=30)
@@ -37,10 +38,14 @@ class RadarrClient:
         return self._get(f"/movie/{movie_id}")
 
     def quality_profile_id(self) -> int:
+        if self._quality_profile_id is not None:
+            return self._quality_profile_id
+
         profiles = self._get("/qualityprofile")
         for profile in profiles:
             if profile.get("name") == self.config.quality_profile:
-                return int(profile["id"])
+                self._quality_profile_id = int(profile["id"])
+                return self._quality_profile_id
         available = ", ".join(sorted(p.get("name", "") for p in profiles))
         raise RadarrError(
             f"Quality profile {self.config.quality_profile!r} not found. Available: {available}"
@@ -96,5 +101,5 @@ class RadarrClient:
             cmd = self._get(f"/command/{command_id}")
             if cmd.get("status") in {"completed", "failed", "aborted"}:
                 return cmd
-            time.sleep(2)
+            time.sleep(1)
         raise RadarrError(f"Timed out waiting for Radarr command {command_id}")
