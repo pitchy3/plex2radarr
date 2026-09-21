@@ -31,3 +31,25 @@ def test_manual_import_candidates_scans_folder_without_movie_id():
         "filterExistingFiles": "true",
     }
     assert "movieId" not in captured["params"]
+
+
+def test_quality_profile_id_is_cached():
+    client = RadarrClient(
+        RadarrConfig(
+            url="http://radarr",
+            api_key="key",
+            root_folder="/movies",
+            quality_profile="Any",
+        )
+    )
+    calls = []
+
+    def fake_get(path, **params):
+        calls.append((path, params))
+        return [{"id": 7, "name": "Any"}]
+
+    client._get = fake_get
+
+    assert client.quality_profile_id() == 7
+    assert client.quality_profile_id() == 7
+    assert calls == [("/qualityprofile", {})]
