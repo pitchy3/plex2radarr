@@ -113,3 +113,31 @@ def test_print_summary_reports_execution_results(capsys):
     assert "relocate_and_import: 1" in output
     assert "failed: 1" in output
     assert "move_import: 1" in output
+
+
+def test_print_summary_reports_plex_scan_classifications(capsys):
+    plan = [
+        _summary_item("move_import", "unseeded legacy file is inside the library root"),
+        _summary_item("skip", "multiple Plex files in configured Radarr root"),
+    ]
+    stats = SimpleNamespace(
+        total_movies=1100,
+        eligible_movies=785,
+        outside_root_movies=300,
+        multiple_applicable_files=14,
+        no_media_movies=1,
+    )
+
+    _print_summary(
+        plan,
+        dry_run=True,
+        plex_scan_stats=stats,
+    )
+
+    output = capsys.readouterr().out
+    assert "Plex library movies seen: 1100" in output
+    assert "eligible for this Radarr root: 785" in output
+    assert "excluded from automatic import: 315" in output
+    assert "outside configured Radarr root: 300" in output
+    assert "multiple applicable Plex files: 14" in output
+    assert "no media file: 1" in output
