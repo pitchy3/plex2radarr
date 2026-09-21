@@ -867,3 +867,80 @@ def test_single_file_torrent_companion_check_avoids_full_refresh(tmp_path: Path)
 
     assert plex.calls == 0
     assert radarr.calls == 0
+
+
+def test_single_file_torrent_revalidates_radarr_before_relocation(tmp_path: Path):
+    source = tmp_path / "library" / "one.mkv"
+    source.parent.mkdir(parents=True)
+    source.write_text("one")
+    movie = PlexMovie("One", 2001, ExternalIds(tmdb=1), source)
+    match = TorrentMatch(
+        "main", "samehash", "one", source, source.parent, 1.0, Path("one.mkv")
+    )
+
+    class SingleFileQbit(FakeQbit):
+        def matches_for_hash(self, torrent_hash):
+            return [match]
+
+    class ChangingRadarr(FakeRadarr):
+        def __init__(self):
+            super().__init__([{"id": 7, "tmdbId": 1, "hasFile": True}])
+            self.calls = 0
+
+        def movies(self):
+            self.calls += 1
+            return super().movies()
+
+    radarr = ChangingRadarr()
+    qbit = SingleFileQbit(
+        "main",
+        {source: [match]},
+        relocation_root=str(tmp_path / "torrents"),
+    )
+    r = Reconciler(
+        config(),
+        plex=FakePlex([movie]),
+        radarr=radarr,
+        qbits=[qbit],
+        state=StateStore(tmp_path / "state.json"),
+    )
+
+    item = PlanItem(movie, "relocate_and_import", "test", torrent=match)
+
+    with pytest.raises(SelectionError, match="already managed by Radarr"):
+        r._journal_torrent_companions(item, qbit, tmp_path / "torrents")
+
+    assert radarr.calls == 1
+
+
+def test_single_file_torrent_refreshes_missing_radarr_movie_id(tmp_path: Path):
+    source = tmp_path / "library" / "one.mkv"
+    source.parent.mkdir(parents=True)
+    source.write_text("one")
+    movie = PlexMovie("One", 2001, ExternalIds(tmdb=1), source)
+    match = TorrentMatch(
+        "main", "samehash", "one", source, source.parent, 1.0, Path("one.mkv")
+    )
+
+    class SingleFileQbit(FakeQbit):
+        def matches_for_hash(self, torrent_hash):
+            return [match]
+
+    radarr = FakeRadarr([{"id": 7, "tmdbId": 1, "hasFile": False}])
+    qbit = SingleFileQbit(
+        "main",
+        {source: [match]},
+        relocation_root=str(tmp_path / "torrents"),
+    )
+    r = Reconciler(
+        config(),
+        plex=FakePlex([movie]),
+        radarr=radarr,
+        qbits=[qbit],
+        state=StateStore(tmp_path / "state.json"),
+    )
+
+    item = PlanItem(movie, "relocate_and_import", "test", torrent=match)
+    r._journal_torrent_companions(item, qbit, tmp_path / "torrents")
+
+    assert item.radarr_movie_id == 7
